@@ -1,0 +1,9 @@
+Package: com.ntm.privacymanager
+Name: 隐私与安全性
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Maintainer: yzdmm2024
+Author: yzdmm2024
+Section: Tweaks
+Description: 隐私与安全性：在「设置」内集中管理每个 App 的 照片/本地网络/麦克风/相机/定位/跟踪/通讯录 共七类权限。照片、麦克风、相机、定位、跟踪、通讯录 直接改写系统 TCC 数据库；本地网络为尽力项，需系统设置兜底。支持 App 分类(用户/系统/巨魔)、搜索、统计、批量允许/拒绝/重置、配置导入导出。
+Depends: preferenceloader

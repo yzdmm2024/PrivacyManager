@@ -1,0 +1,81 @@
+name: build-privacymanager
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ldid + dpkg
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+          HOMEBREW_NO_INSTALL_CLEANUP: 1
+          HOMEBREW_NO_ENV_HINTS: 1
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: 1
+        run: |
+          brew install ldid dpkg || true
+
+      - name: "Compile PrivacyManager PreferenceBundle (arm64+arm64e)"
+        run: |
+          set -e
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "iOS SDK: $SDK"
+          for arch in arm64 arm64e; do
+            clang -x objective-c -arch "$arch" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+                  -fobjc-arc -fblocks -O2 -fobjc-exceptions \
+                  -c privacymanager/PrivacyManager.m -o "PrivacyManager_${arch}.o"
+            clang -dynamiclib -arch "$arch" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+                  -fobjc-exceptions -Wl,-undefined,dynamic_lookup \
+                  -install_name "@rpath/PrivacyManager.dylib" \
+                  -o "PrivacyManager_${arch}.dylib" "PrivacyManager_${arch}.o"
+          done
+          lipo -create PrivacyManager_arm64.dylib PrivacyManager_arm64e.dylib -output PrivacyManager.dylib
+          file PrivacyManager.dylib
+          lipo -info PrivacyManager.dylib
+
+      - name: "Re-sign with entitlements"
+        run: |
+          ldid -Sprivacymanager/entitlements.plist PrivacyManager.dylib
+          codesign -dvvv PrivacyManager.dylib 2>&1 || true
+          otool -L PrivacyManager.dylib
+
+      - name: "Package deb (rootless: PreferenceBundles + PreferenceLoader)"
+        run: |
+          set -e
+          VERSION=$(sed -n 's/^Version:[ ]*//p' privacymanager/control)
+          BUNDLE=privacymanager/PrivacyManager.bundle
+          mkdir -p "$BUNDLE"
+          cp PrivacyManager.dylib "$BUNDLE/PrivacyManager"
+          cp privacymanager/Info.plist "$BUNDLE/Info.plist"
+          cp privacymanager/PrivacyManager@2x.png "$BUNDLE/PrivacyManager@2x.png"
+          mkdir -p stage/DEBIAN
+          # PreferenceBundles
+          mkdir -p "stage/var/jb/Library/PreferenceBundles"
+          cp -R "$BUNDLE" "stage/var/jb/Library/PreferenceBundles/"
+          # PreferenceLoader
+          mkdir -p "stage/var/jb/Library/PreferenceLoader/Preferences"
+          cp privacymanager/PrivacyManager.plist "stage/var/jb/Library/PreferenceLoader/Preferences/PrivacyManager.plist"
+          # control
+          sed "s/^Version:.*/Version: $VERSION/" privacymanager/control > stage/DEBIAN/control
+          printf '\n' >> stage/DEBIAN/control
+          chmod 755 stage/DEBIAN/control
+          dpkg-deb --root-owner-group -b stage PrivacyManager.deb
+          echo "=== deb layout ==="
+          dpkg-deb -c PrivacyManager.deb
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrivacyManager-deb
+          path: PrivacyManager.deb
+
+      - name: "Release on tag"
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: PrivacyManager.deb
