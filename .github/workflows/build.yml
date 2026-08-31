@@ -30,7 +30,7 @@ jobs:
                   -fobjc-arc -fblocks -O2 -fobjc-exceptions \
                   -c privacymanager/PrivacyManager.m -o "PrivacyManager_${arch}.o"
             clang -dynamiclib -arch "$arch" -isysroot "$SDK" -miphoneos-version-min=14.0 \
-                  -fobjc-exceptions -Wl,-undefined,dynamic_lookup \
+                  -fobjc-exceptions -Wl,-undefined,dynamic_lookup -lsqlite3 \
                   -install_name "@rpath/PrivacyManager.dylib" \
                   -o "PrivacyManager_${arch}.dylib" "PrivacyManager_${arch}.o"
           done

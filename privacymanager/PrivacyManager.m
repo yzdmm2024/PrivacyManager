@@ -31,16 +31,15 @@
 - (NSURL *)bundleURL;
 @end
 
-// Security.framework 在 iOS SDK 中被限制为 macOS 专有，这里仅声明，运行时经 dynamic_lookup 解析
+// Security.framework 在 iOS SDK 中被限制为 macOS 专有；运行时经 dlsym 解析，
+// 避免把受限符号变成 dylib 的「导入未定义符号」——否则在部分越狱环境 dyld 加载时会
+// dlopen 失败，导致 PreferenceLoader 入口静默消失。
 typedef CFTypeRef SecStaticCodeRef;
 typedef CFTypeRef SecRequirementRef;
 typedef uint32_t SecCSFlags;
 #define kSecCSDefaultFlags 0
 #define kSecCSRequirementInformation 1
 #define errSecSuccess 0
-extern OSStatus SecStaticCodeCreateWithPath(CFURLRef path, SecCSFlags flags, SecStaticCodeRef *staticCode);
-extern OSStatus SecCodeCopyRequirements(SecStaticCodeRef code, SecCSFlags flags, SecRequirementRef *requirement);
-extern OSStatus SecRequirementCopyData(SecRequirementRef requirement, SecCSFlags flags, CFDataRef *data);
 
 #pragma mark - 权限枚举与元数据
 typedef NS_ENUM(NSInteger, PMPerm) {
@@ -166,23 +165,39 @@ static NSInteger PM_permStatus(NSInteger p, NSString *client) {
     return result;
 }
 
-// 计算目标 App 的 code requirement（csreq），让系统认可授权
+// 计算目标 App 的 code requirement（csreq），让系统认可授权。
+// 关键：Security 私有符号全部用 dlsym 运行时解析，绝不作为导入符号留在 dylib 里。
 static NSData *PM_csreq(NSString *bundlePath) {
     if (!bundlePath.length) return nil;
     @try {
+        static void *secHandle = NULL;
+        static OSStatus (*pSecStaticCodeCreateWithPath)(CFURLRef, SecCSFlags, SecStaticCodeRef *) = NULL;
+        static OSStatus (*pSecCodeCopyRequirements)(SecStaticCodeRef, SecCSFlags, SecRequirementRef *) = NULL;
+        static OSStatus (*pSecRequirementCopyData)(SecRequirementRef, SecCSFlags, CFDataRef *) = NULL;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            secHandle = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+            if (secHandle) {
+                pSecStaticCodeCreateWithPath = dlsym(secHandle, "SecStaticCodeCreateWithPath");
+                pSecCodeCopyRequirements     = dlsym(secHandle, "SecCodeCopyRequirements");
+                pSecRequirementCopyData      = dlsym(secHandle, "SecRequirementCopyData");
+            }
+        });
+        if (!pSecStaticCodeCreateWithPath || !pSecCodeCopyRequirements || !pSecRequirementCopyData)
+            return nil;
         NSURL *url = [NSURL fileURLWithPath:bundlePath];
         SecStaticCodeRef sc = NULL;
-        if (SecStaticCodeCreateWithPath((__bridge CFURLRef)url, kSecCSDefaultFlags, &sc) != errSecSuccess || !sc)
+        if (pSecStaticCodeCreateWithPath((__bridge CFURLRef)url, kSecCSDefaultFlags, &sc) != errSecSuccess || !sc)
             return nil;
         SecRequirementRef req = NULL;
         NSData *out = nil;
-        if (SecCodeCopyRequirements(sc, kSecCSRequirementInformation, &req) == errSecSuccess && req) {
+        if (pSecCodeCopyRequirements(sc, kSecCSRequirementInformation, &req) == errSecSuccess && req) {
             CFDataRef d = NULL;
-            if (SecRequirementCopyData(req, kSecCSDefaultFlags, &d) == errSecSuccess && d)
+            if (pSecRequirementCopyData(req, kSecCSDefaultFlags, &d) == errSecSuccess && d)
                 out = (__bridge_transfer NSData *)d;
-            CFRelease(req);
+            if (req) CFRelease(req);
         }
-        CFRelease(sc);
+        if (sc) CFRelease(sc);
         return out;
     } @catch (NSException *e) {
         return nil;
@@ -516,6 +531,15 @@ static NSArray *PM_enumerateApps(void) {
 @end
 
 @implementation PMPrincipalController
+
+#pragma mark - PreferenceLoader / PSListController 集成桩
+// 以下方法 PreferenceLoader 在实例化/装配控制器时会调用，空实现仅避免
+// unrecognized selector 崩溃（参考能正常显示的「通知管理」同款写法）。
+- (void)setRootController:(id)rootController {}
+- (void)setParentController:(id)parentController {}
+- (void)setSpecifier:(id)specifier {}
+- (void)setPreferenceLoader:(id)preferenceLoader {}
+- (void)setParentController:(id)parentController specifier:(id)specifier {}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
