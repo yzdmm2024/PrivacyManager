@@ -532,6 +532,7 @@ static NSArray *PM_enumerateApps(void) {
     NSString *_searchText;
     NSInteger _category; // 0 全部 1 用户 2 系统
     NSMutableDictionary *_csreqCache;
+    NSMutableArray *_pmSpecs; // 屏蔽 PSListController 的 specifier 表格，避免按类名加载 PMPrincipalController.plist 崩溃
 }
 @end
 
@@ -546,7 +547,19 @@ static NSArray *PM_enumerateApps(void) {
 - (void)setPreferenceLoader:(id)preferenceLoader {}
 - (void)setParentController:(id)parentController specifier:(id)specifier {}
 
+#pragma mark - 屏蔽 PSListController 的 specifier 表格机制
+// PSListController 进入面板会按「类名」加载 PMPrincipalController.plist，找不到即崩溃。
+// 我们完全用自定义 UI，故让 specifiers 返回空、reloadSpecifiers 仅刷新自定义表格。
+- (id)specifiers {
+    if (!_pmSpecs) _pmSpecs = [NSMutableArray array];
+    return _pmSpecs;
+}
+- (void)reloadSpecifiers {
+    if (_tableView) [_tableView reloadData];
+}
+
 - (void)viewDidLoad {
+    @try {
     [super viewDidLoad];
     self.title = @"隐私与安全性";
     // 用容器承载自定义 UI，覆盖 PL 默认 specifier 表格，避免基类表格干扰/滚动
@@ -556,7 +569,12 @@ static NSArray *PM_enumerateApps(void) {
     [self.view addSubview:_container];
     if ([self respondsToSelector:@selector(tableView)]) {
         id tv = [self tableView];
-        if (tv) { [tv setScrollEnabled:NO]; [tv setHidden:YES]; }
+        if (tv) {
+            if ([tv respondsToSelector:@selector(setDataSource:)]) [tv setDataSource:nil];
+            if ([tv respondsToSelector:@selector(setDelegate:)]) [tv setDelegate:nil];
+            [tv setScrollEnabled:NO];
+            [tv setHidden:YES];
+        }
     }
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     _category = 0;
@@ -608,6 +626,9 @@ static NSArray *PM_enumerateApps(void) {
     _allApps = [NSMutableArray arrayWithArray:PM_enumerateApps()];
     [self filterApps];
     [self updateStat];
+    } @catch (NSException *e) {
+        [self pm_showError:[NSString stringWithFormat:@"初始化崩溃: %@\n%@", e.reason, [[e callStackSymbols] componentsJoinedByString:@"\n"]]];
+    }
 }
 
 - (void)viewDidLayoutSubviews {
@@ -664,13 +685,18 @@ static NSArray *PM_enumerateApps(void) {
 }
 
 #pragma mark - Table
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return _apps.count; }
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    if (tableView != _tableView) return 0;
+    return _apps.count;
+}
 
 - (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (tableView != _tableView) return 0;
     return [PMPrivacyCard cardHeight] + 10;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    if (tableView != _tableView) return [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
     static NSString *cid = @"pmcard";
     UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:cid];
     if (!cell) {
@@ -826,6 +852,26 @@ static NSArray *PM_enumerateApps(void) {
         [self toast:[NSString stringWithFormat:@"已导入 %ld 条权限设置", (long)n]];
     }]];
     [self presentViewController:ac animated:YES completion:nil];
+}
+
+- (void)pm_showError:(NSString *)msg {
+    @try {
+        NSString *path = @"/var/mobile/Documents/privacymanager_diag.log";
+        NSString *old = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+        NSString *full = [NSString stringWithFormat:@"%@\n[viewDidLoad exception]\n%@\n", old ?: @"", msg];
+        [full writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } @catch (NSException *e2) {}
+    if (!_container) {
+        _container = [[UIView alloc] initWithFrame:self.view.bounds];
+        _container.backgroundColor = [UIColor systemGroupedBackgroundColor];
+        [self.view addSubview:_container];
+    }
+    UILabel *lab = [[UILabel alloc] initWithFrame:CGRectInset(self.view.bounds, 20, 60)];
+    lab.numberOfLines = 0;
+    lab.textColor = [UIColor systemRedColor];
+    lab.font = [UIFont systemFontOfSize:13];
+    lab.text = msg;
+    [_container addSubview:lab];
 }
 
 - (void)toast:(NSString *)msg {
