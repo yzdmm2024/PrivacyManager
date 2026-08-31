@@ -345,25 +345,54 @@ static void PM_reloadTCC(void) {
 }
 
 #pragma mark - App 枚举
+// 用文件系统扫描枚举 App，不依赖任何私有 API（LSApplicationWorkspace 在部分越狱环境
+// 会返回空导致面板空白）。优先扫真实安装路径，最后才用 LSApplicationWorkspace 兜底。
 static NSArray *PM_enumerateApps(void) {
     NSMutableArray *apps = [NSMutableArray array];
+    NSMutableDictionary *seen = [NSMutableDictionary dictionary];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    void (^addBundle)(NSString *appPath, NSString *type) = ^(NSString *appPath, NSString *type) {
+        NSString *infoPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
+        NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:infoPath];
+        if (!info) return;
+        NSString *bid = info[@"CFBundleIdentifier"];
+        if (!bid.length || seen[bid]) return;
+        seen[bid] = @(1);
+        NSString *name = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"] ?: bid;
+        [apps addObject:@{ @"bid": bid, @"name": (name.length ? name : bid),
+                           @"type": type, @"path": appPath }];
+    };
     @try {
-        Class cls = NSClassFromString(@"LSApplicationWorkspace");
-        if (!cls) dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_NOW);
-        cls = NSClassFromString(@"LSApplicationWorkspace");
-        if (!cls) return apps;
-        id ws = [cls performSelector:@selector(defaultWorkspace)];
-        NSArray *proxies = [ws performSelector:@selector(allApplications)];
-        for (id p in proxies) {
-            NSString *bid = [p applicationIdentifier];
-            if (!bid.length) continue;
-            NSString *name = [p localizedName] ?: [p itemName];
-            NSString *type = [p applicationType] ?: @"User";
-            NSURL *burl = [p bundleURL];
-            [apps addObject:@{ @"bid": bid,
-                               @"name": (name.length ? name : bid),
-                               @"type": type,
-                               @"path": (burl ? [burl path] : @"") }];
+        // 1) 用户 App
+        NSString *userRoot = @"/var/containers/Bundle/Application";
+        for (NSString *d in [fm contentsOfDirectoryAtPath:userRoot error:nil] ?: @[]) {
+            NSString *base = [userRoot stringByAppendingPathComponent:d];
+            for (NSString *s in [fm contentsOfDirectoryAtPath:base error:nil] ?: @[]) {
+                if ([s hasSuffix:@".app"]) addBundle([base stringByAppendingPathComponent:s], @"User");
+            }
+        }
+        // 2) 系统 App
+        for (NSString *s in [fm contentsOfDirectoryAtPath:@"/Applications" error:nil] ?: @[]) {
+            if ([s hasSuffix:@".app"]) addBundle([@"/Applications" stringByAppendingPathComponent:s], @"System");
+        }
+        // 3) 兜底：LSApplicationWorkspace（仅当前两种都失败时才用）
+        if (apps.count == 0) {
+            Class cls = NSClassFromString(@"LSApplicationWorkspace");
+            if (!cls) dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_NOW);
+            cls = NSClassFromString(@"LSApplicationWorkspace");
+            if (cls) {
+                id ws = [cls performSelector:@selector(defaultWorkspace)];
+                for (id p in [ws performSelector:@selector(allApplications)] ?: @[]) {
+                    NSString *bid = [p applicationIdentifier];
+                    if (!bid.length || seen[bid]) continue;
+                    NSString *name = [p localizedName] ?: [p itemName] ?: bid;
+                    NSURL *burl = [p bundleURL];
+                    seen[bid] = @(1);
+                    [apps addObject:@{ @"bid": bid, @"name": (name.length ? name : bid),
+                                       @"type": ([p applicationType] ?: @"User"),
+                                       @"path": (burl ? [burl path] : @"") }];
+                }
+            }
         }
         [apps sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
             return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];
@@ -587,7 +616,7 @@ static NSArray *PM_enumerateApps(void) {
     _searchBar.searchBarStyle = UISearchBarStyleMinimal;
     [_container addSubview:_searchBar];
 
-    _segment = [[UISegmentedControl alloc] initWithItems:@[@"全部", @"用户", @"系统"]];
+    _segment = [[UISegmentedControl alloc] initWithItems:@[@"全部", @"用户", @"系统", @"已授权"]];
     _segment.selectedSegmentIndex = 0;
     [_segment addTarget:self action:@selector(segmentChanged) forControlEvents:UIControlEventValueChanged];
     [_container addSubview:_segment];
@@ -624,6 +653,13 @@ static NSArray *PM_enumerateApps(void) {
     }
 
     _allApps = [NSMutableArray arrayWithArray:PM_enumerateApps()];
+    // 诊断：记录枚举到的 App 数量，便于排查"面板空白"
+    @try {
+        NSString *dp = @"/var/mobile/Documents/privacymanager_diag.log";
+        NSString *old = [NSString stringWithContentsOfFile:dp encoding:NSUTF8StringEncoding error:nil];
+        NSString *line = [NSString stringWithFormat:@"[viewDidLoad] 枚举到 %ld 个 App", (long)_allApps.count];
+        [((old ?: @"") stringByAppendingFormat:@"\n%@\n", line) writeToFile:dp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } @catch (NSException *e2) {}
     [self filterApps];
     [self updateStat];
     } @catch (NSException *e) {
@@ -660,6 +696,15 @@ static NSArray *PM_enumerateApps(void) {
     for (NSDictionary *a in _allApps) {
         if (_category == 1 && ![a[@"type"] isEqualToString:@"User"]) continue;
         if (_category == 2 && ![a[@"type"] isEqualToString:@"System"]) continue;
+        if (_category == 3) {
+            // 已授权：存在任一 TCC 记录（允许/拒绝/受限）即视为在系统"隐私与安全性"中出现过
+            BOOL any = NO;
+            for (NSInteger p = 0; p < PMPermCount; p++) {
+                NSInteger st = (p == PMPermLocalNetwork) ? PM_lnStatus(a[@"bid"]) : PM_permStatus(p, a[@"bid"]);
+                if (st == 0 || st == 2 || st == 3) { any = YES; break; }
+            }
+            if (!any) continue;
+        }
         if (q.length) {
             NSString *n = [a[@"name"] lowercaseString];
             NSString *b = [a[@"bid"] lowercaseString];
