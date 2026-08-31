@@ -658,7 +658,8 @@ static NSArray *PM_enumerateApps(void) {
         NSString *dp = @"/var/mobile/Documents/privacymanager_diag.log";
         NSString *old = [NSString stringWithContentsOfFile:dp encoding:NSUTF8StringEncoding error:nil];
         NSString *line = [NSString stringWithFormat:@"[viewDidLoad] 枚举到 %ld 个 App", (long)_allApps.count];
-        [((old ?: @"") stringByAppendingFormat:@"\n%@\n", line) writeToFile:dp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSString *entry = [(old ?: @"") stringByAppendingFormat:@"\n%@\n", line];
+        [entry writeToFile:dp atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch (NSException *e2) {}
     [self filterApps];
     [self updateStat];
