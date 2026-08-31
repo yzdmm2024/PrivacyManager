@@ -52,7 +52,8 @@ jobs:
           mkdir -p "$BUNDLE"
           cp PrivacyManager.dylib "$BUNDLE/PrivacyManager"
           cp privacymanager/Info.plist "$BUNDLE/Info.plist"
-          cp privacymanager/PrivacyManager@2x.png "$BUNDLE/PrivacyManager@2x.png"
+          cp privacymanager/Root.plist "$BUNDLE/Root.plist"
+          cp privacymanager/icon.png "$BUNDLE/icon.png"
           mkdir -p stage/DEBIAN
           # PreferenceBundles
           mkdir -p "stage/var/jb/Library/PreferenceBundles"

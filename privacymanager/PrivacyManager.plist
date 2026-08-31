@@ -13,7 +13,7 @@
 		<key>isController</key>
 		<true/>
 		<key>icon</key>
-		<string>PrivacyManager.bundle/PrivacyManager@2x.png</string>
+		<string>PrivacyManager.bundle/icon.png</string>
 		<key>label</key>
 		<string>隐私与安全性</string>
 	</dict>

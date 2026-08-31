@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>隐私与安全性</string>
+			<key>footerText</key>
+			<string>下方为各 App 的隐私权限集中管理（自定义界面）。</string>
+		</dict>
+	</array>
+	<key>title</key>
+	<string>隐私与安全性</string>
+</dict>
+</plist>

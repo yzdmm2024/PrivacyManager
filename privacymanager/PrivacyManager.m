@@ -18,6 +18,10 @@
 
 #pragma mark - 前向声明（避免私有头依赖）
 @interface PSViewController : UIViewController @end
+@interface PSListController : PSViewController
+- (id)tableView;
+- (void)setScrollEnabled:(BOOL)enabled;
+@end
 
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
@@ -513,10 +517,11 @@ static NSArray *PM_enumerateApps(void) {
 @end
 
 #pragma mark - 主控制器
-@interface PMPrincipalController : PSViewController <UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate>
+@interface PMPrincipalController : PSListController <UITableViewDelegate, UITableViewDataSource, UISearchBarDelegate>
 @end
 
 @interface PMPrincipalController () {
+    UIView *_container;
     UITableView *_tableView;
     UISearchBar *_searchBar;
     UISegmentedControl *_segment;
@@ -544,6 +549,15 @@ static NSArray *PM_enumerateApps(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"隐私与安全性";
+    // 用容器承载自定义 UI，覆盖 PL 默认 specifier 表格，避免基类表格干扰/滚动
+    _container = [[UIView alloc] initWithFrame:self.view.bounds];
+    _container.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    _container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:_container];
+    if ([self respondsToSelector:@selector(tableView)]) {
+        id tv = [self tableView];
+        if (tv) { [tv setScrollEnabled:NO]; [tv setHidden:YES]; }
+    }
     self.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
     _category = 0;
     _searchText = @"";
@@ -553,17 +567,17 @@ static NSArray *PM_enumerateApps(void) {
     _searchBar.placeholder = @"搜索 App";
     _searchBar.delegate = self;
     _searchBar.searchBarStyle = UISearchBarStyleMinimal;
-    [self.view addSubview:_searchBar];
+    [_container addSubview:_searchBar];
 
     _segment = [[UISegmentedControl alloc] initWithItems:@[@"全部", @"用户", @"系统"]];
     _segment.selectedSegmentIndex = 0;
     [_segment addTarget:self action:@selector(segmentChanged) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:_segment];
+    [_container addSubview:_segment];
 
     _statLabel = [[UILabel alloc] init];
     _statLabel.font = [UIFont systemFontOfSize:12];
     _statLabel.textColor = [UIColor secondaryLabelColor];
-    [self.view addSubview:_statLabel];
+    [_container addSubview:_statLabel];
 
     _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     _tableView.delegate = self;
@@ -571,11 +585,11 @@ static NSArray *PM_enumerateApps(void) {
     _tableView.backgroundColor = [UIColor clearColor];
     _tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
     _tableView.rowHeight = UITableViewAutomaticDimension;
-    [self.view addSubview:_tableView];
+    [_container addSubview:_tableView];
 
     _bottomBar = [[UIView alloc] init];
     _bottomBar.backgroundColor = [UIColor secondarySystemBackgroundColor];
-    [self.view addSubview:_bottomBar];
+    [_container addSubview:_bottomBar];
     NSArray *titles = @[@"全部允许", @"全部拒绝", @"导出", @"导入"];
     NSArray *sels = @[NSStringFromSelector(@selector(batchAllow)),
                       NSStringFromSelector(@selector(batchDeny)),
@@ -824,3 +838,30 @@ static NSArray *PM_enumerateApps(void) {
 }
 
 @end
+
+#pragma mark - 真机诊断（dylib 一被加载即记录，用于定位“设置无入口”根因）
+__attribute__((constructor))
+static void PM_diagnose_load(void) {
+    @autoreleasepool {
+        @try {
+            NSString *path = @"/var/mobile/Documents/privacymanager_diag.log";
+            NSMutableString *log = [NSMutableString string];
+            [log appendFormat:@"=== PrivacyManager dylib 加载诊断 @ %@ ===\n", [NSDate date]];
+            Class c = NSClassFromString(@"PMPrincipalController");
+            [log appendFormat:@"PMPrincipalController 已注册: %@\n", c ? @"YES" : @"NO"];
+            Class psl = NSClassFromString(@"PSListController");
+            [log appendFormat:@"PSListController 存在: %@\n", psl ? @"YES" : @"NO"];
+            Class psv = NSClassFromString(@"PSViewController");
+            [log appendFormat:@"PSViewController 存在: %@\n", psv ? @"YES" : @"NO"];
+            void *sym = dlsym(RTLD_DEFAULT, "OBJC_CLASS_$_UITableView");
+            [log appendFormat:@"OBJC_CLASS_$_UITableView: %p\n", sym];
+            [log appendFormat:@"dlerror: %s\n", dlerror() ?: "none"];
+            NSFileManager *fm = [NSFileManager defaultManager];
+            if ([fm fileExistsAtPath:path]) {
+                NSString *old = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+                if (old.length) [log insertString:[old stringByAppendingString:@"\n"] atIndex:0];
+            }
+            [log writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        } @catch (NSException *e) {}
+    }
+}
