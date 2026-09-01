@@ -19,6 +19,15 @@
 #import <signal.h>
 #import <time.h>
 
+// Security.framework 在 iOS SDK 中被限制为 macOS 专有；运行时经 dlsym 解析，
+// 避免把受限符号变成 dylib 的「导入未定义符号」导致 dyld 加载失败、面板静默消失。
+typedef CFTypeRef SecStaticCodeRef;
+typedef CFTypeRef SecRequirementRef;
+typedef uint32_t SecCSFlags;
+#define kSecCSDefaultFlags 0
+#define kSecCSRequirementInformation 1
+#define errSecSuccess 0
+
 #pragma mark - 前向声明
 // PSViewController 是 PreferenceLoader 控制器的正确基类（实现 PSController 协议），
 // 提供 setSpecifier:/setParentController:/setRootController: 等集成方法，避免
