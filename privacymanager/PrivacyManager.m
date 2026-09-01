@@ -31,9 +31,12 @@
 // 这里只声明我们用到的接口，避免链接期依赖。
 @interface PSSpecifier : NSObject
 + (id)preferenceSpecifierNamed:(NSString *)name target:(id)target set:(SEL)setSelector get:(SEL)getSelector detail:(Class)detailClass cell:(int)cellType edit:(Class)editClass;
++ (id)groupSpecifierWithName:(NSString *)name;
 - (void)setProperty:(id)property forKey:(NSString *)key;
 - (id)propertyForKey:(NSString *)key;
-- (void)setAction:(SEL)action;
+// 注意：本机（iOS 16.6.1）Preferences.framework 的 PSSpecifier **没有** setAction:
+// （调用即抛 unrecognized selector → 整页空白）。按钮点击动作只能用 setButtonAction:。
+- (void)setButtonAction:(SEL)action;
 @end
 
 // PSSpecifier cell 类型常量（与 Preferences.framework 完全一致，抄错会崩）
@@ -447,7 +450,6 @@ static NSArray *PM_enumerateApps(void) {
 
 @implementation PMPrincipalController {
     NSArray *_apps;
-    NSMutableArray *_specs;
 }
 
 #pragma mark - PreferenceLoader / PSListController 集成桩（部分 PL 版本会调用，空实现避免 unrecognized selector）
@@ -459,67 +461,81 @@ static NSArray *PM_enumerateApps(void) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"隐私与安全性";
+    // 枚举 App（主源 TCC.db），失败也不能让面板崩
+    @try { _apps = PM_enumerateApps() ?: @[]; }
+    @catch (NSException *e) {
+        _apps = @[];
+        [self diag:[NSString stringWithFormat:@"[enumerateApps EXCEPTION] %@: %@", e.name, e.reason]];
+    }
+    // 用「赋值给框架属性」的方式喂 specifiers（对齐能正常工作的超级截图写法，
+    // 而不是 override -specifiers 自己返回 _specs —— 那个模式在本机 PSListController 下会导致整页空白）。
+    @try { self.specifiers = [self buildSpecifiers]; }
+    @catch (NSException *e) {
+        [self diag:[NSString stringWithFormat:@"[buildSpecifiers EXCEPTION] %@", e.reason]];
+        PSSpecifier *dg = [PSSpecifier groupSpecifierWithName:@"诊断"];
+        @try { [dg setProperty:[self diagText] forKey:@"footerText"]; } @catch (NSException *ex) {}
+        self.specifiers = @[dg];
+    }
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // 兜底：偶发空白时（框架同帧刷新把 table 刷空），下一帧补建
+    if (self.specifiers == nil || [self specifiers].count == 0) {
+        @try { self.specifiers = [self buildSpecifiers]; } @catch (NSException *e) {}
+    }
 }
 
 #pragma mark - 构建 specifiers（面板内容）
-- (id)specifiers {
-    if (!_specs) {
-        _specs = [NSMutableArray array];
+- (NSArray *)buildSpecifiers {
+    NSMutableArray *specs = [NSMutableArray array];
 
-        // —— 顶部：批量操作（无条件先建，确保即使 App 枚举失败面板也有内容）——
-        PSSpecifier *topGroup = [PSSpecifier preferenceSpecifierNamed:@"操作"
-                                                              target:self set:nil get:nil detail:nil cell:PMCellGroup edit:nil];
-        [topGroup setProperty:@"列出系统中「隐私与安全性」出现过的 App；开关实时写入 TCC.db 与系统双向同步。本地网络为尽力项。"
-                       forKey:@"footerText"];
-        [_specs addObject:topGroup];
-        [_specs addObject:[self buttonSpec:@"全部允许" action:@selector(actAllowAll)]];
-        [_specs addObject:[self buttonSpec:@"全部拒绝" action:@selector(actDenyAll)]];
-        [_specs addObject:[self buttonSpec:@"导出配置" action:@selector(actExport)]];
-        [_specs addObject:[self buttonSpec:@"导入配置" action:@selector(actImport)]];
+    // —— 顶部：批量操作 ——
+    PSSpecifier *top = [PSSpecifier groupSpecifierWithName:@"操作"];
+    [top setProperty:@"列出系统中「隐私与安全性」出现过的 App；开关实时读写 TCC.db，与系统双向同步。本地网络为尽力项。"
+              forKey:@"footerText"];
+    [specs addObject:top];
+    [specs addObject:[self buttonSpec:@"全部允许" action:@selector(actAllowAll)]];
+    [specs addObject:[self buttonSpec:@"全部拒绝" action:@selector(actDenyAll)]];
+    [specs addObject:[self buttonSpec:@"导出配置" action:@selector(actExport)]];
+    [specs addObject:[self buttonSpec:@"导入配置" action:@selector(actImport)]];
 
-        // —— App 列表：TCC.db 主源 + 文件系统补充 ——
-        @try { _apps = PM_enumerateApps(); }
-        @catch (NSException *e) {
-            _apps = @[];
-            [self diag:[NSString stringWithFormat:@"[enumerateApps EXCEPTION] %@: %@", e.name, e.reason]];
-        }
-        if (!_apps) _apps = @[];
+    // —— App 列表：TCC.db 主源 + 文件系统补充（_apps 已在 viewDidLoad 枚举好）——
+    for (NSDictionary *app in _apps) {
+        @try {
+            NSString *name = app[@"name"] ?: app[@"bid"];
+            PSSpecifier *g = [PSSpecifier groupSpecifierWithName:name];
+            [g setProperty:app[@"bid"] forKey:@"PMClient"];
+            [specs addObject:g];
 
-        for (NSDictionary *app in _apps) {
-            @try {
-                NSString *name = app[@"name"] ?: app[@"bid"];
-                PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:name
-                                                               target:self set:nil get:nil detail:nil cell:PMCellGroup edit:nil];
-                [g setProperty:app[@"bid"] forKey:@"PMClient"];
-                [_specs addObject:g];
-
-                for (NSInteger p = 0; p < PMPermCount; p++) {
-                    PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:PM_permName(p)
-                                                                   target:self
-                                                                      set:@selector(pmSet:specifier:)
-                                                                      get:@selector(pmGet:)
-                                                                   detail:nil cell:PMCellSwitch edit:nil];
-                    [sw setProperty:app[@"bid"] forKey:@"PMClient"];
-                    [sw setProperty:@(p) forKey:@"PMPerm"];
-                    [_specs addObject:sw];
-                }
-
-                PSSpecifier *reset = [self buttonSpec:[NSString stringWithFormat:@"重置「%@」", name]
-                                               action:@selector(actReset:)];
-                [reset setProperty:app[@"bid"] forKey:@"PMClient"];
-                [_specs addObject:reset];
-            } @catch (NSException *e) {
-                [self diag:[NSString stringWithFormat:@"[app group %@ EXCEPTION] %@", app[@"bid"], e.reason]];
+            for (NSInteger p = 0; p < PMPermCount; p++) {
+                PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:PM_permName(p)
+                                                               target:self
+                                                                  set:@selector(pmSet:specifier:)
+                                                                  get:@selector(pmGet:)
+                                                              detail:nil
+                                                                cell:PMCellSwitch
+                                                                edit:nil];
+                [sw setProperty:app[@"bid"] forKey:@"PMClient"];
+                [sw setProperty:@(p) forKey:@"PMPerm"];
+                [specs addObject:sw];
             }
-        }
 
-        // 诊断分组（始终显示，便于定位空白问题）
-        PSSpecifier *dg = [PSSpecifier preferenceSpecifierNamed:@"诊断"
-                                                        target:self set:nil get:nil detail:nil cell:PMCellGroup edit:nil];
-        [dg setProperty:[self diagText] forKey:@"footerText"];
-        [_specs addObject:dg];
+            PSSpecifier *reset = [self buttonSpec:[NSString stringWithFormat:@"重置「%@」", name]
+                                           action:@selector(actReset:)];
+            [reset setProperty:app[@"bid"] forKey:@"PMClient"];
+            [specs addObject:reset];
+        } @catch (NSException *e) {
+            [self diag:[NSString stringWithFormat:@"[app group %@ EXCEPTION] %@", app[@"bid"], e.reason]];
+        }
     }
-    return _specs;
+
+    // 诊断分组（始终显示，便于定位空白问题）
+    PSSpecifier *dg = [PSSpecifier groupSpecifierWithName:@"诊断"];
+    @try { [dg setProperty:[self diagText] forKey:@"footerText"]; } @catch (NSException *e) {}
+    [specs addObject:dg];
+
+    return specs;
 }
 
 - (NSString *)diagText {
@@ -557,8 +573,15 @@ static NSArray *PM_enumerateApps(void) {
 
 - (PSSpecifier *)buttonSpec:(NSString *)title action:(SEL)action {
     PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:title
-                                                    target:self set:nil get:nil detail:nil cell:PMCellButton edit:nil];
-    [s setAction:action];
+                                                   target:self
+                                                      set:NULL
+                                                      get:NULL
+                                                 detail:nil
+                                                   cell:PMCellButton
+                                                   edit:nil];
+    // 关键：本机 Preferences.framework 没有 setAction:（会抛 unrecognized selector → 整页空白）。
+    // 按钮点击动作必须用 setButtonAction:（已用 frida 在真机枚举确认存在且可调用）。
+    [s setButtonAction:action];
     return s;
 }
 
