@@ -901,7 +901,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         NSString *bid = item[@"bid"];
         NSArray *perms = item[@"perms"];
         if (![bid isKindOfClass:[NSString class]] || ![perms isKindOfClass:[NSArray class]]) continue;
-        NSDictionary *match = nil;
+        NSMutableDictionary *match = nil;
         for (NSMutableDictionary *a in _allApps) if ([a[@"bid"] isEqualToString:bid]) { match = a; break; }
         if (!match) continue;
         NSData *cs = match[@"path"] ? PM_csreq(match[@"path"]) : nil;
