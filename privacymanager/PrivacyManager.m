@@ -684,36 +684,31 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     for (NSInteger p = 0; p < PMPermCount; p++) {
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text = PM_permName(p);
-        lbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+        lbl.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
         lbl.textColor = [UIColor colorWithWhite:0.18 alpha:1];
-        [lbl setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+        lbl.textAlignment = NSTextAlignmentCenter;
+        lbl.adjustsFontSizeToFitWidth = YES;
+        lbl.minimumScaleFactor = 0.7;
 
         UISwitch *sw = [[UISwitch alloc] init];
         sw.tag = p;
-        sw.transform = CGAffineTransformMakeScale(0.82, 0.82);
+        sw.transform = CGAffineTransformMakeScale(0.62, 0.62);
         sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
         [sw addTarget:self action:@selector(funcSwitchChanged:) forControlEvents:UIControlEventValueChanged];
         [_funcSwitches addObject:sw];
 
         UIStackView *cell = [[UIStackView alloc] initWithArrangedSubviews:@[lbl, sw]];
-        cell.axis = UILayoutConstraintAxisHorizontal;
+        cell.axis = UILayoutConstraintAxisVertical;
         cell.alignment = UIStackViewAlignmentCenter;
-        cell.spacing = 8;
+        cell.spacing = 3;
         [cells addObject:cell];
     }
-    // 两列网格：左列放偶数项，右列放奇数项
-    NSMutableArray *left = [NSMutableArray array], *right = [NSMutableArray array];
-    for (NSInteger p = 0; p < cells.count; p++) {
-        (p % 2 == 0) ? [left addObject:cells[p]] : [right addObject:cells[p]];
-    }
-    while (left.count > right.count) [right addObject:[UIView new]];
-    while (right.count > left.count) [left addObject:[UIView new]];
-    UIStackView *leftCol = [[UIStackView alloc] initWithArrangedSubviews:left];
-    leftCol.axis = UILayoutConstraintAxisVertical; leftCol.spacing = 10; leftCol.alignment = UIStackViewAlignmentFill;
-    UIStackView *rightCol = [[UIStackView alloc] initWithArrangedSubviews:right];
-    rightCol.axis = UILayoutConstraintAxisVertical; rightCol.spacing = 10; rightCol.alignment = UIStackViewAlignmentFill;
-    UIStackView *grid = [[UIStackView alloc] initWithArrangedSubviews:@[leftCol, rightCol]];
-    grid.axis = UILayoutConstraintAxisHorizontal; grid.spacing = 18; grid.distribution = UIStackViewDistributionFillEqually;
+    // 单横排：7 个权限开关一字排开
+    UIStackView *grid = [[UIStackView alloc] initWithArrangedSubviews:cells];
+    grid.axis = UILayoutConstraintAxisHorizontal;
+    grid.spacing = 1;
+    grid.distribution = UIStackViewDistributionFillEqually;
+    grid.alignment = UIStackViewAlignmentTop;
 
     UIStackView *funcStack = [[UIStackView alloc] initWithArrangedSubviews:@[funcTitle, grid]];
     funcStack.axis = UILayoutConstraintAxisVertical; funcStack.spacing = 12;
