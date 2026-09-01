@@ -1,10 +1,12 @@
-// PrivacyManager.m — 隐私与安全性 设置面板（PreferenceBundle，原生 PSListController + PSSpecifier）
+// PrivacyManager.m — 隐私与安全性 设置面板（自定义 UITableView 卡片式 UI）
 //
 // 设计目标：成为系统「设置 → 隐私与安全性」的实时镜像。
-//   - App 列表直接来自系统真相源 /var/mobile/Library/TCC/TCC.db（与系统面板完全一致：那边有 这边就有）
+//   - App 列表来自系统真相源 /var/mobile/Library/TCC/TCC.db（与系统面板一致）
 //   - 每个 App 的 7 类权限开关直接读写同一个 TCC.db（你开他就开 你关他就关，双向同步）
 // 运行于 Settings.app 进程（platform-application，已脱离沙盒），可直读写 TCC.db。
 //
+// UI 架构参考同机正常工作的「通知管理」插件：PSViewController + 自绘 UITableView，
+// 每个 App 一张卡片（图标 + 名称 + 重置 + 总开关 + 横排权限开关），浅色玻璃风格。
 // 编译: clang -dynamiclib (arm64+arm64e) -> PrivacyManager（无扩展名）放入 .bundle
 
 #import <Foundation/Foundation.h>
@@ -17,50 +19,11 @@
 #import <signal.h>
 #import <time.h>
 
-#pragma mark - 前向声明（避免私有头依赖）
+#pragma mark - 前向声明
+// PSViewController 是 PreferenceLoader 控制器的正确基类（实现 PSController 协议），
+// 提供 setSpecifier:/setParentController:/setRootController: 等集成方法，避免
+// controllerForSpecifier: 调用未实现方法导致 unrecognized selector 崩溃。
 @interface PSViewController : UIViewController @end
-@interface PSListController : PSViewController
-- (NSArray *)specifiers;
-- (void)setSpecifiers:(NSArray *)specifiers;
-- (id)tableView;
-- (void)reloadSpecifiers;
-- (void)reloadSpecifier:(id)specifier;
-- (void)setScrollEnabled:(BOOL)enabled;
-@end
-
-// PSSpecifier 运行时由 Preference.framework（被 PreferenceLoader 载入 Settings）提供，
-// 这里只声明我们用到的接口，避免链接期依赖。
-@interface PSSpecifier : NSObject
-+ (id)preferenceSpecifierNamed:(NSString *)name target:(id)target set:(SEL)setSelector get:(SEL)getSelector detail:(Class)detailClass cell:(int)cellType edit:(Class)editClass;
-+ (id)groupSpecifierWithName:(NSString *)name;
-- (void)setProperty:(id)property forKey:(NSString *)key;
-- (id)propertyForKey:(NSString *)key;
-// 注意：本机（iOS 16.6.1）Preferences.framework 的 PSSpecifier **没有** setAction:
-// （调用即抛 unrecognized selector → 整页空白）。按钮点击动作只能用 setButtonAction:。
-- (void)setButtonAction:(SEL)action;
-@end
-
-// PSSpecifier cell 类型常量（与 Preferences.framework 完全一致，抄错会崩）
-// 真实值：TitleValue=0, Group=1, Switch=2, Button=3, EditText=4, Segment=5, StaticText=6, Link=7
-enum {
-    PMCellTitleValue = 0,
-    PMCellGroup = 1,
-    PMCellSwitch = 2,
-    PMCellButton = 3,
-    PMCellEditText = 4,
-    PMCellSegment = 5,
-    PMCellStaticText = 6,
-    PMCellLink = 7
-};
-
-// Security.framework 在 iOS SDK 中被限制为 macOS 专有；运行时经 dlsym 解析，
-// 避免把受限符号变成 dylib 的「导入未定义符号」导致 dyld 加载失败、面板静默消失。
-typedef CFTypeRef SecStaticCodeRef;
-typedef CFTypeRef SecRequirementRef;
-typedef uint32_t SecCSFlags;
-#define kSecCSDefaultFlags 0
-#define kSecCSRequirementInformation 1
-#define errSecSuccess 0
 
 #pragma mark - 权限枚举与元数据
 typedef NS_ENUM(NSInteger, PMPerm) {
@@ -162,21 +125,6 @@ static NSArray *PM_accessColumns(void) {
     return cols;
 }
 
-// 某 service 在当前设备 TCC 中是否被使用（避免给不存在的 service 造无效行）
-static BOOL PM_serviceInUse(NSString *svc) {
-    BOOL used = NO;
-    sqlite3 *db = PM_openTCC();
-    if (!db) return NO;
-    sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT 1 FROM access WHERE service=? LIMIT 1", -1, &s, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(s, 1, [svc UTF8String], -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(s) == SQLITE_ROW) used = YES;
-    }
-    sqlite3_finalize(s);
-    sqlite3_close(db);
-    return used;
-}
-
 // 读取某 client 在某 service 的 auth_value：-1 未知
 static NSInteger PM_status(NSString *svc, NSString *client) {
     NSInteger r = -1;
@@ -271,9 +219,9 @@ static BOOL PM_setStatus(NSString *svc, NSString *client, NSInteger val, NSData 
             sqlite3_finalize(s);
         } else {
             NSArray *cols = PM_accessColumns();
-            NSArray *names = @[@"service", @"client", @"auth_value", @"auth_reason",
+            NSArray *names = @[@"service", @"client", @"client_type", @"auth_value", @"auth_reason",
                               @"auth_version", @"csreq", @"policy_id", @"last_modified", @"flag"];
-            NSArray *values = @[svc, client, @(val), @(1), @(1),
+            NSArray *values = @[svc, client, @0, @(val), @(1), @(1),
                                  (csreq ?: [NSNull null]), @(0), @((long)time(NULL)), @(0)];
             NSMutableArray *vNames = [NSMutableArray array];
             NSMutableArray *vVals = [NSMutableArray array];
@@ -326,11 +274,11 @@ static void PM_resetPerm(NSInteger p, NSString *client) {
     sqlite3_close(db);
 }
 
-// 批量设置某 App 某权限
+// 批量设置某 App 某权限（每个候选 service 都写，确保授权真正生效）
 static void PM_applyPerm(NSInteger p, NSString *client, NSInteger val, NSData *csreq) {
     if (!PM_permIsTCC(p)) return; // 本地网络不走 TCC
     for (NSString *svc in PM_permServices(p)) {
-        if (PM_serviceInUse(svc)) PM_setStatus(svc, client, val, csreq);
+        PM_setStatus(svc, client, val, csreq);
     }
 }
 
@@ -389,7 +337,6 @@ static NSArray *PM_enumerateApps(void) {
     for (NSUInteger i = 0; i < svcs.count; i++) {
         [inList appendFormat:@"%@'%@'", (i ? @"," : @""), svcs[i]];
     }
-    // 先试 client_type=0（bundle id 应用），若结果为空则放宽到全部 client_type 再查一次
     NSArray *queries = @[
         [NSString stringWithFormat:@"SELECT DISTINCT client FROM access WHERE client_type=0 AND client IS NOT NULL AND client!='' AND service IN (%@)", inList],
         [NSString stringWithFormat:@"SELECT DISTINCT client FROM access WHERE client IS NOT NULL AND client!='' AND service IN (%@)", inList],
@@ -446,265 +393,539 @@ static NSArray *PM_enumerateApps(void) {
     return out;
 }
 
-#pragma mark - 主控制器（原生 PSListController + PSSpecifier）
-@interface PMPrincipalController : PSListController @end
-
-@implementation PMPrincipalController {
-    NSArray *_apps;
+// 把某 App 当前 7 类权限状态填入其字典的 perms 数组（后台线程调用，避免首次进入卡顿）
+static void PM_fillPerms(NSMutableDictionary *app) {
+    if (!app) return;
+    NSMutableArray *perms = [NSMutableArray array];
+    NSString *bid = app[@"bid"];
+    for (NSInteger p = 0; p < PMPermCount; p++) {
+        NSInteger st = (p == PMPermLocalNetwork) ? PM_lnStatus(bid) : PM_permStatus(p, bid);
+        [perms addObject:@(st)];
+    }
+    app[@"perms"] = perms;
 }
 
-#pragma mark - PreferenceLoader / PSListController 集成桩（部分 PL 版本会调用，空实现避免 unrecognized selector）
-- (void)setRootController:(id)rootController {}
-- (void)setParentController:(id)parentController {}
-- (void)setSpecifier:(id)specifier {}
-- (void)setPreferenceLoader:(id)preferenceLoader {}
+#pragma mark - App 卡片视图（仿通知管理 NTMAppCardView）
+@interface PMPermCardView : UIView
+@property (nonatomic, strong) NSMutableDictionary *app;
+@property (nonatomic, strong) UIImageView *iconView;
+@property (nonatomic, strong) UISwitch *masterSwitch;
+@property (nonatomic, strong) NSMutableArray<UISwitch *> *permSwitches;
+@property (nonatomic, copy) void (^onChange)(NSString *appId);
+- (instancetype)initWithApp:(NSMutableDictionary *)app;
+- (void)reloadFromModel;
+@end
 
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = @"隐私与安全性";
-    // 枚举 App（主源 TCC.db），失败也不能让面板崩
-    @try { _apps = PM_enumerateApps() ?: @[]; }
-    @catch (NSException *e) {
-        _apps = @[];
-        [self diag:[NSString stringWithFormat:@"[enumerateApps EXCEPTION] %@: %@", e.name, e.reason]];
+@implementation PMPermCardView
+
+- (instancetype)initWithApp:(NSMutableDictionary *)app {
+    self = [super init];
+    if (self) {
+        _app = app;
+        _permSwitches = [NSMutableArray array];
+        [self buildUI];
     }
-    // 用「赋值给框架属性」的方式喂 specifiers（对齐能正常工作的超级截图写法，
-    // 而不是 override -specifiers 自己返回 _specs —— 那个模式在本机 PSListController 下会导致整页空白）。
-    @try { self.specifiers = [self buildSpecifiers]; }
-    @catch (NSException *e) {
-        [self diag:[NSString stringWithFormat:@"[buildSpecifiers EXCEPTION] %@", e.reason]];
-        PSSpecifier *dg = [PSSpecifier groupSpecifierWithName:@"诊断"];
-        @try { [dg setProperty:[self diagText] forKey:@"footerText"]; } @catch (NSException *ex) {}
-        self.specifiers = @[dg];
-    }
+    return self;
 }
 
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    // 兜底：偶发空白时（框架同帧刷新把 table 刷空），下一帧补建
-    if (!self.specifiers || self.specifiers.count == 0) {
-        @try { self.specifiers = [self buildSpecifiers]; } @catch (NSException *e) {}
+- (void)buildUI {
+    self.backgroundColor = [UIColor colorWithWhite:0.98 alpha:0.92];
+    self.layer.cornerRadius = 18;
+    self.layer.masksToBounds = NO;
+    self.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
+    self.layer.shadowOpacity = 1;
+    self.layer.shadowRadius = 12;
+    self.layer.shadowOffset = CGSizeMake(0, 4);
+
+    // ── 头部行：图标 + 名称 + 重置 + 总开关 ──
+    _iconView = [[UIImageView alloc] init];
+    _iconView.contentMode = UIViewContentModeScaleAspectFill;
+    _iconView.layer.cornerRadius = 9;
+    _iconView.clipsToBounds = YES;
+    _iconView.backgroundColor = [UIColor colorWithRed:0.88 green:0.90 blue:0.95 alpha:1];
+    [_iconView.widthAnchor constraintEqualToConstant:36].active = YES;
+    [_iconView.heightAnchor constraintEqualToConstant:36].active = YES;
+    [self loadIconAsync];
+
+    UILabel *nameLabel = [[UILabel alloc] init];
+    nameLabel.text = _app[@"name"] ?: _app[@"bid"];
+    nameLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    nameLabel.textColor = [UIColor colorWithWhite:0.12 alpha:1];
+    [nameLabel setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [nameLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+
+    UIButton *resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [resetBtn setTitle:@"重置" forState:UIControlStateNormal];
+    [resetBtn setTitleColor:[UIColor colorWithRed:0.78 green:0.28 blue:0.28 alpha:1] forState:UIControlStateNormal];
+    resetBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+    [resetBtn addTarget:self action:@selector(resetTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UILabel *masterLabel = [[UILabel alloc] init];
+    masterLabel.text = @"总开关";
+    masterLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    masterLabel.textColor = [UIColor colorWithWhite:0.40 alpha:1];
+
+    _masterSwitch = [[UISwitch alloc] init];
+    _masterSwitch.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
+    [_masterSwitch addTarget:self action:@selector(masterChanged) forControlEvents:UIControlEventValueChanged];
+
+    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[_iconView, nameLabel, resetBtn, masterLabel, _masterSwitch]];
+    header.axis = UILayoutConstraintAxisHorizontal;
+    header.alignment = UIStackViewAlignmentCenter;
+    header.spacing = 10;
+
+    // ── 权限开关行：7 个权限横排 ──
+    NSMutableArray *permItems = [NSMutableArray array];
+    for (NSInteger p = 0; p < PMPermCount; p++) {
+        UILabel *lbl = [[UILabel alloc] init];
+        lbl.text = PM_permName(p);
+        lbl.font = [UIFont systemFontOfSize:10];
+        lbl.textColor = [UIColor colorWithWhite:0.35 alpha:1];
+        lbl.textAlignment = NSTextAlignmentCenter;
+
+        UISwitch *sw = [[UISwitch alloc] init];
+        sw.transform = CGAffineTransformMakeScale(0.66, 0.66);
+        sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
+        [sw addTarget:self action:@selector(permChanged:) forControlEvents:UIControlEventValueChanged];
+        [_permSwitches addObject:sw];
+
+        UIStackView *item = [[UIStackView alloc] initWithArrangedSubviews:@[lbl, sw]];
+        item.axis = UILayoutConstraintAxisVertical;
+        item.alignment = UIStackViewAlignmentCenter;
+        item.spacing = 2;
+        [permItems addObject:item];
     }
+    UIStackView *permRow = [[UIStackView alloc] initWithArrangedSubviews:permItems];
+    permRow.axis = UILayoutConstraintAxisHorizontal;
+    permRow.distribution = UIStackViewDistributionFillEqually;
+    permRow.alignment = UIStackViewAlignmentCenter;
+    permRow.spacing = 4;
+
+    // ── 垂直堆叠 ──
+    UIStackView *v = [[UIStackView alloc] initWithArrangedSubviews:@[header, permRow]];
+    v.axis = UILayoutConstraintAxisVertical;
+    v.spacing = 12;
+    v.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:v];
+    [NSLayoutConstraint activateConstraints:@[
+        [v.topAnchor constraintEqualToAnchor:self.topAnchor constant:14],
+        [v.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:14],
+        [v.trailingAnchor constraintEqualToAnchor:self.trailingAnchor constant:-14],
+        [v.bottomAnchor constraintEqualToAnchor:self.bottomAnchor constant:-14],
+    ]];
+
+    [self reloadFromModel];
 }
 
-#pragma mark - 构建 specifiers（面板内容）
-- (NSArray *)buildSpecifiers {
-    NSMutableArray *specs = [NSMutableArray array];
-
-    // —— 顶部：批量操作 ——
-    PSSpecifier *top = [PSSpecifier groupSpecifierWithName:@"操作"];
-    [top setProperty:@"列出系统中「隐私与安全性」出现过的 App；开关实时读写 TCC.db，与系统双向同步。本地网络为尽力项。"
-              forKey:@"footerText"];
-    [specs addObject:top];
-    [specs addObject:[self buttonSpec:@"全部允许" action:@selector(actAllowAll)]];
-    [specs addObject:[self buttonSpec:@"全部拒绝" action:@selector(actDenyAll)]];
-    [specs addObject:[self buttonSpec:@"导出配置" action:@selector(actExport)]];
-    [specs addObject:[self buttonSpec:@"导入配置" action:@selector(actImport)]];
-
-    // —— App 列表：TCC.db 主源 + 文件系统补充（_apps 已在 viewDidLoad 枚举好）——
-    for (NSDictionary *app in _apps) {
+- (void)loadIconAsync {
+    NSString *bid = _app[@"bid"];
+    if (!bid.length) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        UIImage *icon = nil;
         @try {
-            NSString *name = app[@"name"] ?: app[@"bid"];
-            PSSpecifier *g = [PSSpecifier groupSpecifierWithName:name];
-            [g setProperty:app[@"bid"] forKey:@"PMClient"];
-            [specs addObject:g];
-
-            for (NSInteger p = 0; p < PMPermCount; p++) {
-                PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:PM_permName(p)
-                                                               target:self
-                                                                  set:@selector(pmSet:specifier:)
-                                                                  get:@selector(pmGet:)
-                                                              detail:nil
-                                                                cell:PMCellSwitch
-                                                                edit:nil];
-                [sw setProperty:app[@"bid"] forKey:@"PMClient"];
-                [sw setProperty:@(p) forKey:@"PMPerm"];
-                [specs addObject:sw];
-            }
-
-            PSSpecifier *reset = [self buttonSpec:[NSString stringWithFormat:@"重置「%@」", name]
-                                           action:@selector(actReset:)];
-            [reset setProperty:app[@"bid"] forKey:@"PMClient"];
-            [specs addObject:reset];
-        } @catch (NSException *e) {
-            [self diag:[NSString stringWithFormat:@"[app group %@ EXCEPTION] %@", app[@"bid"], e.reason]];
+            id (*f)(id, SEL, id, long long, double) = (id (*)(id, SEL, id, long long, double))objc_msgSend;
+            icon = f((id)UIImage.class,
+                     sel_registerName("_applicationIconImageForBundleIdentifier:format:scale:"),
+                     bid, 0, 2.0);
+        } @catch (NSException *e) {}
+        if (icon && [icon isKindOfClass:UIImage.class]) {
+            dispatch_async(dispatch_get_main_queue(), ^{ self.iconView.image = icon; });
         }
+    });
+}
+
+- (void)masterChanged {
+    BOOL on = _masterSwitch.on;
+    NSString *bid = _app[@"bid"];
+    NSData *cs = _app[@"path"] ? PM_csreq(_app[@"path"]) : nil;
+    for (NSInteger p = 0; p < PMPermCount; p++) {
+        if (p == PMPermLocalNetwork) PM_lnSet(bid, on);
+        else PM_applyPerm(p, bid, on ? 2 : 0, cs);
     }
-
-    // 诊断分组（始终显示，便于定位空白问题）
-    PSSpecifier *dg = [PSSpecifier groupSpecifierWithName:@"诊断"];
-    @try { [dg setProperty:[self diagText] forKey:@"footerText"]; } @catch (NSException *e) {}
-    [specs addObject:dg];
-
-    return specs;
+    [self reloadFromModel];
+    if (_onChange) _onChange(bid);
 }
 
-- (NSString *)diagText {
-    NSMutableString *t = [NSMutableString string];
-    @try {
-        NSString *p = PM_tccPath();
-        [t appendFormat:@"TCC.db 路径: %@\n", p];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        [t appendFormat:@"文件存在: %@\n", [fm fileExistsAtPath:p] ? @"是" : @"否"];
-        sqlite3 *db = PM_openTCC();
-        if (db) {
-            [t appendString:@"数据库打开: 成功\n"];
-            NSMutableString *inL = [NSMutableString string];
-            NSArray *psv = PM_privacyServices();
-            for (NSUInteger i = 0; i < psv.count; i++)
-                [inL appendFormat:@"%@'%@'", (i ? @"," : @""), psv[i]];
-            sqlite3_stmt *s = NULL;
-            if (sqlite3_prepare_v2(db, [[NSString stringWithFormat:
-                @"SELECT COUNT(DISTINCT client) FROM access WHERE client_type=0 AND service IN (%@)", inL] UTF8String], -1, &s, NULL) == SQLITE_OK) {
-                if (sqlite3_step(s) == SQLITE_ROW)
-                    [t appendFormat:@"隐私类(App)数: %d\n", sqlite3_column_int(s, 0)];
-            }
-            sqlite3_finalize(s);
-            sqlite3_close(db);
-        } else {
-            [t appendString:@"数据库打开: 失败(无权限/锁/路径错)\n"];
-        }
-        [t appendFormat:@"本面板枚举 App 数: %ld\n", (long)(_apps ? _apps.count : 0)];
-        [t appendString:(_apps.count ? @"✅ 数据正常" : @"⚠️ 无数据，请截图反馈")];
-    } @catch (NSException *e) {
-        [t appendFormat:@"diagText 异常: %@", e.reason];
-    }
-    return t;
+- (void)permChanged:(UISwitch *)sender {
+    NSUInteger idx = [_permSwitches indexOfObject:sender];
+    if (idx == NSNotFound || idx >= PMPermCount) return;
+    BOOL on = sender.on;
+    NSString *bid = _app[@"bid"];
+    NSData *cs = _app[@"path"] ? PM_csreq(_app[@"path"]) : nil;
+    if (idx == PMPermLocalNetwork) PM_lnSet(bid, on);
+    else PM_applyPerm((NSInteger)idx, bid, on ? 2 : 0, cs);
+    [self reloadFromModel];
+    if (_onChange) _onChange(bid);
 }
 
-- (PSSpecifier *)buttonSpec:(NSString *)title action:(SEL)action {
-    PSSpecifier *s = [PSSpecifier preferenceSpecifierNamed:title
-                                                   target:self
-                                                      set:NULL
-                                                      get:NULL
-                                                 detail:nil
-                                                   cell:PMCellButton
-                                                   edit:nil];
-    // 关键：本机 Preferences.framework 没有 setAction:（会抛 unrecognized selector → 整页空白）。
-    // 按钮点击动作必须用 setButtonAction:（已用 frida 在真机枚举确认存在且可调用）。
-    [s setButtonAction:action];
-    return s;
-}
-
-#pragma mark - 开关 getter / setter（核心：读写 TCC.db，双向同步）
-- (id)pmGet:(PSSpecifier *)spec {
-    NSInteger p = [[spec propertyForKey:@"PMPerm"] integerValue];
-    NSString *bid = [spec propertyForKey:@"PMClient"];
-    NSInteger st = (p == PMPermLocalNetwork) ? PM_lnStatus(bid) : PM_permStatus(p, bid);
-    return @(st == 2 || st == 3);
-}
-
-- (void)pmSet:(id)value specifier:(PSSpecifier *)spec {
-    BOOL on = [value boolValue];
-    NSInteger p = [[spec propertyForKey:@"PMPerm"] integerValue];
-    NSString *bid = [spec propertyForKey:@"PMClient"];
-    if (p == PMPermLocalNetwork) {
-        PM_lnSet(bid, on);
-    } else {
-        NSDictionary *app = [self appForBid:bid];
-        NSData *cs = nil;
-        if (app[@"path"]) cs = PM_csreq(app[@"path"]);
-        PM_applyPerm(p, bid, on ? 2 : 0, cs);
-    }
-    // 仅刷新当前开关，立即反映写入结果
-    if ([self respondsToSelector:@selector(reloadSpecifier:)]) [self reloadSpecifier:spec];
-}
-
-- (NSDictionary *)appForBid:(NSString *)bid {
-    for (NSDictionary *a in _apps) if ([a[@"bid"] isEqualToString:bid]) return a;
-    return nil;
-}
-
-#pragma mark - 批量 / 重置
-- (void)actAllowAll { [self batchSet:YES]; }
-- (void)actDenyAll  { [self batchSet:NO]; }
-
-- (void)batchSet:(BOOL)value {
-    for (NSDictionary *app in _apps) {
-        NSString *bid = app[@"bid"];
-        NSData *cs = app[@"path"] ? PM_csreq(app[@"path"]) : nil;
-        for (NSInteger p = 0; p < PMPermCount; p++) {
-            if (p == PMPermLocalNetwork) PM_lnSet(bid, value);
-            else PM_applyPerm(p, bid, value ? 2 : 0, cs);
-        }
-    }
-    if ([self respondsToSelector:@selector(reloadSpecifiers)]) [self reloadSpecifiers];
-    [self toast:[NSString stringWithFormat:@"已将 %ld 个 App 的权限%@", (long)_apps.count, value ? @"全部设为允许" : @"全部设为拒绝"]];
-}
-
-- (void)actReset:(PSSpecifier *)spec {
-    NSString *bid = [spec propertyForKey:@"PMClient"];
-    if (!bid) return;
+- (void)resetTapped {
+    NSString *bid = _app[@"bid"];
     for (NSInteger p = 0; p < PMPermCount; p++) {
         if (p == PMPermLocalNetwork) PM_lnSet(bid, NO);
         else PM_resetPerm(p, bid);
     }
-    if ([self respondsToSelector:@selector(reloadSpecifiers)]) [self reloadSpecifiers];
-    [self toast:[NSString stringWithFormat:@"已重置 %@", bid]];
+    [self reloadFromModel];
+    if (_onChange) _onChange(bid);
+}
+
+- (void)reloadFromModel {
+    NSArray *perms = _app[@"perms"];
+    if (!perms || perms.count != PMPermCount) PM_fillPerms(_app);
+    perms = _app[@"perms"];
+    BOOL allOn = YES;
+    for (NSInteger p = 0; p < PMPermCount; p++) {
+        NSInteger st = (perms && p < perms.count) ? [perms[p] integerValue] : -1;
+        BOOL on = (st == 2 || st == 3);
+        if (p < _permSwitches.count) _permSwitches[p].on = on;
+        if (!on) allOn = NO;
+    }
+    _masterSwitch.on = allOn;
+}
+
+@end
+
+#pragma mark - 主控制器（PSViewController + 自绘 UITableView，仿通知管理）
+@interface PMPrincipalController : PSViewController <UISearchBarDelegate, UITableViewDelegate, UITableViewDataSource>
+@end
+
+@implementation PMPrincipalController {
+    UISearchBar *_searchBar;
+    UILabel *_statLabel;
+    UITableView *_tableView;
+    UIActivityIndicatorView *_spinner;
+    NSArray *_allApps;   // NSMutableDictionary 数组（含 perms）
+    NSArray *_curApps;
+    NSString *_searchText;
+}
+
+// PreferenceLoader/PSListController 集成方法（自定义 UI 不使用，仅避免 unrecognized selector 崩溃）
+- (void)setRootController:(id)rootController {}
+- (void)setParentController:(id)parentController {}
+- (void)setSpecifier:(id)specifier {}
+- (void)setPreferenceLoader:(id)preferenceLoader {}
+- (void)setParentController:(id)parentController specifier:(id)specifier {}
+
+static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:fg forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+    b.backgroundColor = bg;
+    b.layer.cornerRadius = 14;
+    b.clipsToBounds = YES;
+    return b;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"隐私与安全性";
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    self.view.backgroundColor = [UIColor colorWithRed:0.95 green:0.96 blue:0.98 alpha:1];
+    _searchText = @"";
+
+    [self buildUI];
+
+    _spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    _spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [_spinner startAnimating];
+    [self.view addSubview:_spinner];
+    [NSLayoutConstraint activateConstraints:@[
+        [_spinner.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [_spinner.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+    ]];
+
+    // 异步枚举 App + 预读权限状态，避免进入面板卡顿
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray *apps = PM_enumerateApps();
+        for (NSMutableDictionary *a in apps) PM_fillPerms(a);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            _allApps = apps;
+            [self reloadList];
+        });
+    });
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // 回到面板时从 TCC 重新同步（系统在别处改了权限也能反映）
+    if (_allApps.count) {
+        for (NSMutableDictionary *a in _allApps) PM_fillPerms(a);
+        [self reloadList];
+    }
+}
+
+- (void)buildUI {
+    // 批量操作：全部允许 / 全部拒绝
+    UIButton *allowAll = PM_pillButton(@"全部允许",
+        [UIColor colorWithRed:0.45 green:0.78 blue:0.54 alpha:0.18],
+        [UIColor colorWithRed:0.13 green:0.55 blue:0.24 alpha:1]);
+    [allowAll addTarget:self action:@selector(allowAllTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *denyAll = PM_pillButton(@"全部拒绝",
+        [UIColor colorWithRed:0.87 green:0.24 blue:0.24 alpha:0.15],
+        [UIColor colorWithRed:0.72 green:0.17 blue:0.17 alpha:1]);
+    [denyAll addTarget:self action:@selector(denyAllTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    UIStackView *batchRow = [[UIStackView alloc] initWithArrangedSubviews:@[allowAll, denyAll]];
+    batchRow.axis = UILayoutConstraintAxisHorizontal;
+    batchRow.distribution = UIStackViewDistributionFillEqually;
+    batchRow.spacing = 10;
+
+    _statLabel = [[UILabel alloc] init];
+    _statLabel.font = [UIFont systemFontOfSize:12];
+    _statLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+
+    _searchBar = [[UISearchBar alloc] init];
+    _searchBar.placeholder = @"搜索应用名称或 Bundle ID";
+    _searchBar.delegate = self;
+    _searchBar.searchBarStyle = UISearchBarStyleMinimal;
+    _searchBar.backgroundImage = [UIImage new];
+
+    _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+    _tableView.delegate = self;
+    _tableView.dataSource = self;
+    _tableView.separatorStyle = UITableViewCellSeparatorStyleNone;
+    _tableView.backgroundColor = [UIColor clearColor];
+    _tableView.keyboardDismissMode = UIScrollViewKeyboardDismissModeOnDrag;
+    _tableView.contentInset = UIEdgeInsetsMake(4, 0, 80, 0);
+
+    UIButton *exportBtn = PM_pillButton(@"导出配置",
+        [UIColor colorWithRed:0.35 green:0.56 blue:1.0 alpha:0.15],
+        [UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1]);
+    [exportBtn addTarget:self action:@selector(exportConfig) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *importBtn = PM_pillButton(@"导入配置",
+        [UIColor colorWithRed:0.45 green:0.78 blue:0.54 alpha:0.18],
+        [UIColor colorWithRed:0.13 green:0.55 blue:0.24 alpha:1]);
+    [importBtn addTarget:self action:@selector(importConfig) forControlEvents:UIControlEventTouchUpInside];
+
+    UIView *bottomBar = [[UIView alloc] init];
+    bottomBar.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.95];
+    bottomBar.translatesAutoresizingMaskIntoConstraints = NO;
+    UIStackView *bottomRow = [[UIStackView alloc] initWithArrangedSubviews:@[exportBtn, importBtn]];
+    bottomRow.axis = UILayoutConstraintAxisHorizontal;
+    bottomRow.distribution = UIStackViewDistributionFillEqually;
+    bottomRow.spacing = 12;
+    bottomRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [bottomBar addSubview:bottomRow];
+    [NSLayoutConstraint activateConstraints:@[
+        [bottomRow.topAnchor constraintEqualToAnchor:bottomBar.topAnchor constant:8],
+        [bottomRow.leadingAnchor constraintEqualToAnchor:bottomBar.leadingAnchor constant:16],
+        [bottomRow.trailingAnchor constraintEqualToAnchor:bottomBar.trailingAnchor constant:-16],
+        [bottomRow.bottomAnchor constraintEqualToAnchor:bottomBar.bottomAnchor constant:-8],
+    ]];
+
+    for (UIView *v in @[_tableView, batchRow, _statLabel, _searchBar, bottomBar]) {
+        v.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.view addSubview:v];
+    }
+
+    [NSLayoutConstraint activateConstraints:@[
+        [batchRow.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
+        [batchRow.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [batchRow.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
+        [batchRow.heightAnchor constraintEqualToConstant:40],
+
+        [_statLabel.topAnchor constraintEqualToAnchor:batchRow.bottomAnchor constant:8],
+        [_statLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
+        [_statLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
+
+        [_searchBar.topAnchor constraintEqualToAnchor:_statLabel.bottomAnchor constant:2],
+        [_searchBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
+        [_searchBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-8],
+
+        [_tableView.topAnchor constraintEqualToAnchor:_searchBar.bottomAnchor constant:6],
+        [_tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [_tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [_tableView.bottomAnchor constraintEqualToAnchor:bottomBar.topAnchor constant:-4],
+
+        [bottomBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [bottomBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [bottomBar.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    ]];
+}
+
+- (void)hideSpinner {
+    if (_spinner) { [_spinner stopAnimating]; [_spinner removeFromSuperview]; _spinner = nil; }
+}
+
+#pragma mark - UITableViewDataSource
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return _curApps.count;
+}
+- (CGFloat)tableView:(UITableView *)tableView heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    return 132;
+}
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"card"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"card"];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.backgroundColor = [UIColor clearColor];
+    }
+    for (UIView *v in cell.contentView.subviews) [v removeFromSuperview];
+
+    NSMutableDictionary *app = _curApps[indexPath.row];
+    PMPermCardView *card = [[PMPermCardView alloc] initWithApp:app];
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    __weak typeof(self) ws = self;
+    card.onChange = ^(NSString *aid) { [ws refreshStat]; };
+    [cell.contentView addSubview:card];
+    [NSLayoutConstraint activateConstraints:@[
+        [card.topAnchor constraintEqualToAnchor:cell.contentView.topAnchor constant:6],
+        [card.leadingAnchor constraintEqualToAnchor:cell.contentView.leadingAnchor constant:16],
+        [card.trailingAnchor constraintEqualToAnchor:cell.contentView.trailingAnchor constant:-16],
+        [card.bottomAnchor constraintEqualToAnchor:cell.contentView.bottomAnchor constant:-6],
+    ]];
+    return cell;
+}
+
+#pragma mark - 列表
+- (void)reloadList {
+    NSMutableArray *filtered = [NSMutableArray array];
+    for (NSMutableDictionary *app in _allApps) {
+        if (_searchText.length) {
+            NSString *name = app[@"name"];
+            NSString *bid = app[@"bid"];
+            if (![name localizedCaseInsensitiveContainsString:_searchText] &&
+                ![bid localizedCaseInsensitiveContainsString:_searchText]) continue;
+        }
+        [filtered addObject:app];
+    }
+    _curApps = filtered;
+
+    if (!filtered.count) {
+        UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 260, 80)];
+        empty.text = _allApps.count ? @"没有匹配的应用" : @"暂无应用（TCC 中无隐私类记录）";
+        empty.font = [UIFont systemFontOfSize:14];
+        empty.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+        empty.textAlignment = NSTextAlignmentCenter;
+        _tableView.backgroundView = empty;
+    } else {
+        _tableView.backgroundView = nil;
+    }
+
+    [_tableView reloadData];
+    [self refreshStat];
+    [self hideSpinner];
+}
+
+- (void)refreshAllCards {
+    for (UITableViewCell *cell in _tableView.visibleCells) {
+        for (UIView *v in cell.contentView.subviews) {
+            if ([v isKindOfClass:[PMPermCardView class]]) [(PMPermCardView *)v reloadFromModel];
+        }
+    }
+}
+
+- (void)refreshStat {
+    NSInteger total = 0, on = 0;
+    for (NSDictionary *app in _curApps) {
+        NSArray *perms = app[@"perms"];
+        BOOL all = YES;
+        for (NSInteger p = 0; p < PMPermCount; p++) {
+            NSInteger st = (perms && p < perms.count) ? [perms[p] integerValue] : -1;
+            if (!(st == 2 || st == 3)) { all = NO; break; }
+        }
+        if (all) on++;
+        total++;
+    }
+    NSString *scope = _searchText.length ? [NSString stringWithFormat:@"搜索：%@", _searchText] : @"全部应用";
+    _statLabel.text = [NSString stringWithFormat:@"%@    已全开 %ld / %ld 个应用", scope, (long)on, (long)total];
+}
+
+#pragma mark - 批量
+- (void)allowAllTapped { [self batchWrite:YES]; }
+- (void)denyAllTapped  { [self batchWrite:NO]; }
+
+- (void)batchWrite:(BOOL)val {
+    for (NSMutableDictionary *app in _allApps) {
+        NSString *bid = app[@"bid"];
+        NSData *cs = app[@"path"] ? PM_csreq(app[@"path"]) : nil;
+        NSMutableArray *perms = app[@"perms"];
+        if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; app[@"perms"] = perms; }
+        for (NSInteger p = 0; p < PMPermCount; p++) {
+            if (p == PMPermLocalNetwork) PM_lnSet(bid, val);
+            else PM_applyPerm(p, bid, val ? 2 : 0, cs);
+            if (p < perms.count) perms[p] = @(val ? 2 : 0);
+            else [perms addObject:@(val ? 2 : 0)];
+        }
+    }
+    [self refreshAllCards];
+    [self refreshStat];
+    [self toast:[NSString stringWithFormat:@"已将 %ld 个应用权限%@", (long)_allApps.count, val ? @"全部允许" : @"全部拒绝"]];
 }
 
 #pragma mark - 导入 / 导出
-- (void)actExport {
-    NSMutableDictionary *out = [NSMutableDictionary dictionary];
-    out[@"version"] = @1;
+- (void)exportConfig {
     NSMutableArray *arr = [NSMutableArray array];
-    for (NSDictionary *a in _apps) {
-        NSMutableDictionary *perms = [NSMutableDictionary dictionary];
-        for (NSInteger p = 0; p < PMPermCount; p++) {
-            NSInteger st = (p == PMPermLocalNetwork) ? PM_lnStatus(a[@"bid"]) : PM_permStatus(p, a[@"bid"]);
-            perms[PM_permKey(p)] = @(st);
-        }
-        [arr addObject:@{ @"bid": a[@"bid"], @"name": (a[@"name"] ?: a[@"bid"]), @"perms": perms }];
+    for (NSDictionary *app in _allApps) {
+        [arr addObject:@{ @"bid": app[@"bid"], @"name": (app[@"name"] ?: app[@"bid"]), @"perms": (app[@"perms"] ?: @[]) }];
     }
-    out[@"apps"] = arr;
-    NSError *e = nil;
-    NSData *json = [NSJSONSerialization dataWithJSONObject:out options:NSJSONWritingPrettyPrinted error:&e];
-    if (!json) { [self toast:[NSString stringWithFormat:@"导出失败: %@", e.localizedDescription]]; return; }
-    NSString *path = @"/var/mobile/Documents/privacymanager_export.json";
-    [json writeToFile:path atomically:YES];
-    [self toast:[NSString stringWithFormat:@"已导出 %ld 个 App 到:\n%@", (long)arr.count, path]];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:arr options:NSJSONWritingPrettyPrinted error:nil];
+    if (!data) { [self toast:@"导出失败"]; return; }
+    NSString *path = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/PrivacyManagerConfig.json"];
+    if (![data writeToFile:path atomically:YES]) { [self toast:@"导出失败，无写入权限"]; return; }
+    NSURL *url = [NSURL fileURLWithPath:path];
+    UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[url] applicationActivities:nil];
+    avc.popoverPresentationController.sourceView = self.view;
+    avc.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width/2, self.view.bounds.size.height, 1, 1);
+    [self presentViewController:avc animated:YES completion:nil];
 }
 
-- (void)actImport {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"导入配置"
-                                                               message:@"粘贴此前导出的 JSON（覆盖当前各 App 权限）"
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    [ac addTextFieldWithConfigurationHandler:^(UITextField * _Nonnull tf) {
-        tf.placeholder = @"粘贴 JSON...";
-    }];
-    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [ac addAction:[UIAlertAction actionWithTitle:@"导入" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull a){
-        NSString *txt = ac.textFields.firstObject.text;
-        if (!txt.length) return;
-        NSData *d = [txt dataUsingEncoding:NSUTF8StringEncoding];
-        NSError *err = nil;
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:d options:0 error:&err];
-        if (![json isKindOfClass:[NSDictionary class]]) { [self toast:@"JSON 解析失败"]; return; }
-        NSArray *apps = json[@"apps"];
-        if (![apps isKindOfClass:[NSArray class]]) { [self toast:@"格式错误"]; return; }
-        NSInteger n = 0;
-        for (NSDictionary *item in apps) {
-            NSString *bid = item[@"bid"];
-            NSDictionary *perms = item[@"perms"];
-            if (![bid isKindOfClass:[NSString class]] || ![perms isKindOfClass:[NSDictionary class]]) continue;
-            NSDictionary *match = [self appForBid:bid];
-            NSData *cs = match && match[@"path"] ? PM_csreq(match[@"path"]) : nil;
-            for (NSInteger p = 0; p < PMPermCount; p++) {
-                id v = perms[PM_permKey(p)];
-                if (![v isKindOfClass:[NSNumber class]]) continue;
-                NSInteger st = [v integerValue];
-                if (p == PMPermLocalNetwork) PM_lnSet(bid, (st == 2 || st == 3));
-                else PM_applyPerm(p, bid, (st == 2 || st == 3) ? 2 : 0, cs);
-                n++;
-            }
+- (void)importConfig {
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc]
+        initWithDocumentTypes:@[@"public.json", @"public.data"] inMode:UIDocumentPickerModeImport];
+    picker.delegate = self;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSURL *url = urls.firstObject;
+    if (!url) return;
+    NSData *data = [NSData dataWithContentsOfURL:url];
+    if (!data) { [self toast:@"读取文件失败"]; return; }
+    NSArray *arr = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![arr isKindOfClass:[NSArray class]]) { [self toast:@"配置格式错误"]; return; }
+    NSInteger count = 0;
+    for (NSDictionary *item in arr) {
+        NSString *bid = item[@"bid"];
+        NSArray *perms = item[@"perms"];
+        if (![bid isKindOfClass:[NSString class]] || ![perms isKindOfClass:[NSArray class]]) continue;
+        NSDictionary *match = nil;
+        for (NSMutableDictionary *a in _allApps) if ([a[@"bid"] isEqualToString:bid]) { match = a; break; }
+        if (!match) continue;
+        NSData *cs = match[@"path"] ? PM_csreq(match[@"path"]) : nil;
+        NSMutableArray *mperms = [NSMutableArray array];
+        for (NSInteger p = 0; p < PMPermCount; p++) {
+            NSInteger st = (p < perms.count) ? [perms[p] integerValue] : -1;
+            BOOL on = (st == 2 || st == 3);
+            if (p == PMPermLocalNetwork) PM_lnSet(bid, on);
+            else PM_applyPerm(p, bid, on ? 2 : 0, cs);
+            [mperms addObject:@(on ? 2 : 0)];
         }
-        if ([self respondsToSelector:@selector(reloadSpecifiers)]) [self reloadSpecifiers];
-        [self toast:[NSString stringWithFormat:@"已导入 %ld 条权限设置", (long)n]];
-    }]];
-    [self presentViewController:ac animated:YES completion:nil];
+        match[@"perms"] = mperms;
+        count++;
+    }
+    [self refreshAllCards];
+    [self refreshStat];
+    [self toast:[NSString stringWithFormat:@"已导入 %ld 个应用", (long)count]];
 }
 
-#pragma mark - 诊断 / 提示
+#pragma mark - 搜索（防抖 0.3s）
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+    _searchText = searchText ?: @"";
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(applySearch) object:nil];
+    [self performSelector:@selector(applySearch) withObject:nil afterDelay:0.3];
+}
+- (void)applySearch { [self reloadList]; }
+- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
+    [searchBar resignFirstResponder];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(applySearch) object:nil];
+    [self applySearch];
+}
+
+#pragma mark - 诊断 / Toast
 - (void)diag:(NSString *)msg {
     @try {
         NSString *path = @"/var/mobile/Documents/privacymanager_diag.log";
@@ -715,12 +936,28 @@ static NSArray *PM_enumerateApps(void) {
 }
 
 - (void)toast:(NSString *)msg {
-    UIAlertController *ac = [UIAlertController alertControllerWithTitle:nil message:msg
-                                                        preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:ac animated:YES completion:^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.2 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ [ac dismissViewControllerAnimated:YES completion:nil]; });
-    }];
+    UILabel *l = [[UILabel alloc] init];
+    l.text = msg;
+    l.font = [UIFont systemFontOfSize:13];
+    l.textColor = [UIColor whiteColor];
+    l.backgroundColor = [UIColor colorWithWhite:0 alpha:0.78];
+    l.layer.cornerRadius = 10;
+    l.clipsToBounds = YES;
+    l.textAlignment = NSTextAlignmentCenter;
+    l.numberOfLines = 0;
+    l.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:l];
+    [NSLayoutConstraint activateConstraints:@[
+        [l.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [l.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
+        [l.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:30],
+        [l.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-30],
+    ]];
+    l.alpha = 0;
+    [UIView animateWithDuration:0.2 animations:^{ l.alpha = 1; }];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [UIView animateWithDuration:0.3 animations:^{ l.alpha = 0; } completion:^(BOOL f){ [l removeFromSuperview]; }];
+    });
 }
 
 @end
@@ -737,15 +974,12 @@ static void PM_diagnose_load(void) {
             [log appendFormat:@"PMPrincipalController 已注册: %@\n", c ? @"YES" : @"NO"];
             Class psl = NSClassFromString(@"PSListController");
             [log appendFormat:@"PSListController 存在: %@\n", psl ? @"YES" : @"NO"];
-            void *sym = dlsym(RTLD_DEFAULT, "OBJC_CLASS_$_PSSpecifier");
-            [log appendFormat:@"OBJC_CLASS_$_PSSpecifier: %p\n", sym];
             NSFileManager *fm = [NSFileManager defaultManager];
             if ([fm fileExistsAtPath:PM_tccPath()]) {
                 [log appendFormat:@"TCC.db 存在: YES\n"];
                 sqlite3 *db = PM_openTCC();
                 if (db) {
                     sqlite3_stmt *s = NULL;
-                    // 安全拼接带引号的 IN 列表
                     NSMutableString *inL = [NSMutableString string];
                     NSArray *psv = PM_privacyServices();
                     for (NSUInteger i = 0; i < psv.count; i++)
