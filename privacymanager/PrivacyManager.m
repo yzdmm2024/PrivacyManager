@@ -118,11 +118,23 @@ static NSArray *PM_privacyServices(void) {
 }
 
 #pragma mark - TCC 数据库读写
-static NSString *const kTCCDBPath = @"/var/mobile/Library/TCC/TCC.db";
+// 多候选路径探测：iOS 各版本/越狱形态下 TCC.db 位置可能不同
+static NSString *PM_tccPath(void) {
+    NSArray *cands = @[
+        @"/var/mobile/Library/TCC/TCC.db",
+        @"/private/var/mobile/Library/TCC/TCC.db",
+    ];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *p in cands) {
+        if ([fm fileExistsAtPath:p]) return p;
+    }
+    return cands[0];
+}
 
 static sqlite3 *PM_openTCC(void) {
     sqlite3 *db = NULL;
-    if (sqlite3_open([kTCCDBPath UTF8String], &db) != SQLITE_OK) {
+    NSString *path = PM_tccPath();
+    if (sqlite3_open([path UTF8String], &db) != SQLITE_OK) {
         if (db) sqlite3_close(db);
         return NULL;
     }
@@ -367,26 +379,32 @@ static NSDictionary *PM_nameMap(void) {
 static NSArray *PM_enumerateApps(void) {
     NSMutableDictionary *apps = [NSMutableDictionary dictionary]; // bid -> {bid, path?}
 
-    // 1) 来自 TCC.db：所有在隐私类 service 中出现过的 client（client_type=0 即 bundle id 应用）
+    // 1) 来自 TCC.db：所有在隐私类 service 中出现过的 client
     NSArray *svcs = PM_privacyServices();
     NSMutableString *inList = [NSMutableString string];
     for (NSUInteger i = 0; i < svcs.count; i++) {
         [inList appendFormat:@"%@'%@'", (i ? @"," : @""), svcs[i]];
     }
-    NSString *sql = [NSString stringWithFormat:
-        @"SELECT DISTINCT client FROM access WHERE client_type=0 AND client IS NOT NULL AND client!='' AND service IN (%@)", inList];
+    // 先试 client_type=0（bundle id 应用），若结果为空则放宽到全部 client_type 再查一次
+    NSArray *queries = @[
+        [NSString stringWithFormat:@"SELECT DISTINCT client FROM access WHERE client_type=0 AND client IS NOT NULL AND client!='' AND service IN (%@)", inList],
+        [NSString stringWithFormat:@"SELECT DISTINCT client FROM access WHERE client IS NOT NULL AND client!='' AND service IN (%@)", inList],
+    ];
     sqlite3 *db = PM_openTCC();
     if (db) {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db, [sql UTF8String], -1, &s, NULL) == SQLITE_OK) {
-            while (sqlite3_step(s) == SQLITE_ROW) {
-                const char *c = (const char *)sqlite3_column_text(s, 0);
-                if (!c) continue;
-                NSString *bid = [NSString stringWithUTF8String:c];
-                if (bid.length) apps[bid] = [@{ @"bid": bid } mutableCopy];
+        for (NSString *q in queries) {
+            sqlite3_stmt *s = NULL;
+            if (sqlite3_prepare_v2(db, [q UTF8String], -1, &s, NULL) == SQLITE_OK) {
+                while (sqlite3_step(s) == SQLITE_ROW) {
+                    const char *c = (const char *)sqlite3_column_text(s, 0);
+                    if (!c) continue;
+                    NSString *bid = [NSString stringWithUTF8String:c];
+                    if (bid.length) apps[bid] = [@{ @"bid": bid } mutableCopy];
+                }
             }
+            sqlite3_finalize(s);
+            if (apps.count > 0) break;
         }
-        sqlite3_finalize(s);
         sqlite3_close(db);
     }
 
@@ -446,14 +464,12 @@ static NSArray *PM_enumerateApps(void) {
 #pragma mark - 构建 specifiers（面板内容）
 - (id)specifiers {
     if (!_specs) {
-     @try {
-        _apps = PM_enumerateApps();
         _specs = [NSMutableArray array];
 
-        // —— 顶部：批量操作 ——
+        // —— 顶部：批量操作（无条件先建，确保即使 App 枚举失败面板也有内容）——
         PSSpecifier *topGroup = [PSSpecifier preferenceSpecifierNamed:@"操作"
                                                               target:self set:nil get:nil detail:nil cell:PMCellGroup edit:nil];
-        [topGroup setProperty:@"列出的是系统中「隐私与安全性」出现过的全部 App。开关实时写入系统 TCC 数据库，与系统设置双向同步。本地网络为尽力项（系统不存于 TCC）。"
+        [topGroup setProperty:@"列出系统中「隐私与安全性」出现过的 App；开关实时写入 TCC.db 与系统双向同步。本地网络为尽力项。"
                        forKey:@"footerText"];
         [_specs addObject:topGroup];
         [_specs addObject:[self buttonSpec:@"全部允许" action:@selector(actAllowAll)]];
@@ -461,38 +477,82 @@ static NSArray *PM_enumerateApps(void) {
         [_specs addObject:[self buttonSpec:@"导出配置" action:@selector(actExport)]];
         [_specs addObject:[self buttonSpec:@"导入配置" action:@selector(actImport)]];
 
-        // —— 每个 App 一个分组 + 7 个权限开关 + 重置按钮 ——
+        // —— App 列表：TCC.db 主源 + 文件系统补充 ——
+        @try { _apps = PM_enumerateApps(); }
+        @catch (NSException *e) {
+            _apps = @[];
+            [self diag:[NSString stringWithFormat:@"[enumerateApps EXCEPTION] %@: %@", e.name, e.reason]];
+        }
+        if (!_apps) _apps = @[];
+
         for (NSDictionary *app in _apps) {
-            NSString *name = app[@"name"] ?: app[@"bid"];
-            PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:name
-                                                           target:self set:nil get:nil detail:nil cell:PMCellGroup edit:nil];
-            [g setProperty:app[@"bid"] forKey:@"PMClient"];
-            [_specs addObject:g];
+            @try {
+                NSString *name = app[@"name"] ?: app[@"bid"];
+                PSSpecifier *g = [PSSpecifier preferenceSpecifierNamed:name
+                                                               target:self set:nil get:nil detail:nil cell:PMCellGroup edit:nil];
+                [g setProperty:app[@"bid"] forKey:@"PMClient"];
+                [_specs addObject:g];
 
-            for (NSInteger p = 0; p < PMPermCount; p++) {
-                PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:PM_permName(p)
-                                                               target:self
-                                                                  set:@selector(pmSet:specifier:)
-                                                                  get:@selector(pmGet:)
-                                                               detail:nil cell:PMCellSwitch edit:nil];
-                [sw setProperty:app[@"bid"] forKey:@"PMClient"];
-                [sw setProperty:@(p) forKey:@"PMPerm"];
-                [_specs addObject:sw];
+                for (NSInteger p = 0; p < PMPermCount; p++) {
+                    PSSpecifier *sw = [PSSpecifier preferenceSpecifierNamed:PM_permName(p)
+                                                                   target:self
+                                                                      set:@selector(pmSet:specifier:)
+                                                                      get:@selector(pmGet:)
+                                                                   detail:nil cell:PMCellSwitch edit:nil];
+                    [sw setProperty:app[@"bid"] forKey:@"PMClient"];
+                    [sw setProperty:@(p) forKey:@"PMPerm"];
+                    [_specs addObject:sw];
+                }
+
+                PSSpecifier *reset = [self buttonSpec:[NSString stringWithFormat:@"重置「%@」", name]
+                                               action:@selector(actReset:)];
+                [reset setProperty:app[@"bid"] forKey:@"PMClient"];
+                [_specs addObject:reset];
+            } @catch (NSException *e) {
+                [self diag:[NSString stringWithFormat:@"[app group %@ EXCEPTION] %@", app[@"bid"], e.reason]];
             }
-
-            PSSpecifier *reset = [self buttonSpec:[NSString stringWithFormat:@"重置「%@」", name]
-                                           action:@selector(actReset:)];
-            [reset setProperty:app[@"bid"] forKey:@"PMClient"];
-            [_specs addObject:reset];
         }
 
-        [self diag:[NSString stringWithFormat:@"[specifiers] 枚举到 %ld 个 App（主源 TCC.db）", (long)_apps.count]];
-     } @catch (NSException *e) {
-        [self diag:[NSString stringWithFormat:@"[specifiers EXCEPTION] %@: %@", e.name, e.reason]];
-        if (!_specs) _specs = [NSMutableArray array];
-     }
+        // 诊断分组（始终显示，便于定位空白问题）
+        PSSpecifier *dg = [PSSpecifier preferenceSpecifierNamed:@"诊断"
+                                                        target:self set:nil get:nil detail:nil cell:PMCellGroup edit:nil];
+        [dg setProperty:[self diagText] forKey:@"footerText"];
+        [_specs addObject:dg];
     }
     return _specs;
+}
+
+- (NSString *)diagText {
+    NSMutableString *t = [NSMutableString string];
+    @try {
+        NSString *p = PM_tccPath();
+        [t appendFormat:@"TCC.db 路径: %@\n", p];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        [t appendFormat:@"文件存在: %@\n", [fm fileExistsAtPath:p] ? @"是" : @"否"];
+        sqlite3 *db = PM_openTCC();
+        if (db) {
+            [t appendString:@"数据库打开: 成功\n"];
+            NSMutableString *inL = [NSMutableString string];
+            NSArray *psv = PM_privacyServices();
+            for (NSUInteger i = 0; i < psv.count; i++)
+                [inL appendFormat:@"%@'%@'", (i ? @"," : @""), psv[i]];
+            sqlite3_stmt *s = NULL;
+            if (sqlite3_prepare_v2(db, [[NSString stringWithFormat:
+                @"SELECT COUNT(DISTINCT client) FROM access WHERE client_type=0 AND service IN (%@)", inL] UTF8String], -1, &s, NULL) == SQLITE_OK) {
+                if (sqlite3_step(s) == SQLITE_ROW)
+                    [t appendFormat:@"隐私类(App)数: %d\n", sqlite3_column_int(s, 0)];
+            }
+            sqlite3_finalize(s);
+            sqlite3_close(db);
+        } else {
+            [t appendString:@"数据库打开: 失败(无权限/锁/路径错)\n"];
+        }
+        [t appendFormat:@"本面板枚举 App 数: %ld\n", (long)(_apps ? _apps.count : 0)];
+        [t appendString:(_apps.count ? @"✅ 数据正常" : @"⚠️ 无数据，请截图反馈")];
+    } @catch (NSException *e) {
+        [t appendFormat:@"diagText 异常: %@", e.reason];
+    }
+    return t;
 }
 
 - (PSSpecifier *)buttonSpec:(NSString *)title action:(SEL)action {
@@ -656,7 +716,7 @@ static void PM_diagnose_load(void) {
             void *sym = dlsym(RTLD_DEFAULT, "OBJC_CLASS_$_PSSpecifier");
             [log appendFormat:@"OBJC_CLASS_$_PSSpecifier: %p\n", sym];
             NSFileManager *fm = [NSFileManager defaultManager];
-            if ([fm fileExistsAtPath:kTCCDBPath]) {
+            if ([fm fileExistsAtPath:PM_tccPath()]) {
                 [log appendFormat:@"TCC.db 存在: YES\n"];
                 sqlite3 *db = PM_openTCC();
                 if (db) {
