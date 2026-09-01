@@ -20,7 +20,8 @@
 #pragma mark - 前向声明（避免私有头依赖）
 @interface PSViewController : UIViewController @end
 @interface PSListController : PSViewController
-- (id)specifiers;
+- (NSArray *)specifiers;
+- (void)setSpecifiers:(NSArray *)specifiers;
 - (id)tableView;
 - (void)reloadSpecifiers;
 - (void)reloadSpecifier:(id)specifier;
@@ -481,7 +482,7 @@ static NSArray *PM_enumerateApps(void) {
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     // 兜底：偶发空白时（框架同帧刷新把 table 刷空），下一帧补建
-    if (self.specifiers == nil || [self specifiers].count == 0) {
+    if (!self.specifiers || self.specifiers.count == 0) {
         @try { self.specifiers = [self buildSpecifiers]; } @catch (NSException *e) {}
     }
 }
