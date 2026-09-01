@@ -563,6 +563,10 @@ static void PM_fillPerms(NSMutableDictionary *app) {
         if (p == PMPermLocalNetwork) PM_lnSet(bid, on);
         else PM_applyPerm(p, bid, on ? 2 : 0, cs);
     }
+    // 乐观更新内存模型
+    NSMutableArray *perms = _app[@"perms"];
+    if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; _app[@"perms"] = perms; }
+    for (NSInteger p = 0; p < PMPermCount; p++) { while (perms.count <= p) [perms addObject:@(-1)]; perms[p] = @(on ? 2 : 0); }
     [self reloadFromModel];
     if (_onChange) _onChange(bid);
 }
@@ -575,6 +579,11 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     NSData *cs = _app[@"path"] ? PM_csreq(_app[@"path"]) : nil;
     if (idx == PMPermLocalNetwork) PM_lnSet(bid, on);
     else PM_applyPerm((NSInteger)idx, bid, on ? 2 : 0, cs);
+    // 乐观更新内存模型：否则 reloadFromModel 会用改动前从 TCC 读出的旧 perms 把 switch 设回原值（视觉弹回）
+    NSMutableArray *perms = _app[@"perms"];
+    if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; _app[@"perms"] = perms; }
+    while (perms.count <= idx) [perms addObject:@(-1)];
+    perms[idx] = @(on ? 2 : 0);
     [self reloadFromModel];
     if (_onChange) _onChange(bid);
 }
@@ -585,6 +594,10 @@ static void PM_fillPerms(NSMutableDictionary *app) {
         if (p == PMPermLocalNetwork) PM_lnSet(bid, NO);
         else PM_resetPerm(p, bid);
     }
+    // 重置后内存模型置为“全部未知(-1)”，让 reloadFromModel 触发 PM_fillPerms 重读真实状态
+    NSMutableArray *perms = [NSMutableArray array];
+    for (NSInteger p = 0; p < PMPermCount; p++) [perms addObject:@(-1)];
+    _app[@"perms"] = perms;
     [self reloadFromModel];
     if (_onChange) _onChange(bid);
 }
