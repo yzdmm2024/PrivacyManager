@@ -605,6 +605,7 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     NSArray *_allApps;   // NSMutableDictionary 数组（含 perms）
     NSArray *_curApps;
     NSString *_searchText;
+    NSMutableArray<UISwitch *> *_funcSwitches; // 7 个「按功能」开关
 }
 
 // PreferenceLoader/PSListController 集成方法（自定义 UI 不使用，仅避免 unrecognized selector 崩溃）
@@ -627,7 +628,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"隐私与安全性";
+    self.title = @"隐私总开关";
     self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
     self.view.backgroundColor = [UIColor colorWithRed:0.95 green:0.96 blue:0.98 alpha:1];
     _searchText = @"";
@@ -664,21 +665,66 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 }
 
 - (void)buildUI {
-    // 批量操作：全部允许 / 全部拒绝
-    UIButton *allowAll = PM_pillButton(@"全部允许",
-        [UIColor colorWithRed:0.45 green:0.78 blue:0.54 alpha:0.18],
-        [UIColor colorWithRed:0.13 green:0.55 blue:0.24 alpha:1]);
-    [allowAll addTarget:self action:@selector(allowAllTapped) forControlEvents:UIControlEventTouchUpInside];
+    // ── 按功能一键开关 卡片（替代原「全部允许/全部拒绝」）──
+    UIView *funcCard = [[UIView alloc] init];
+    funcCard.backgroundColor = [UIColor colorWithWhite:0.98 alpha:0.92];
+    funcCard.layer.cornerRadius = 18;
+    funcCard.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
+    funcCard.layer.shadowOpacity = 1;
+    funcCard.layer.shadowRadius = 12;
+    funcCard.layer.shadowOffset = CGSizeMake(0, 4);
 
-    UIButton *denyAll = PM_pillButton(@"全部拒绝",
-        [UIColor colorWithRed:0.87 green:0.24 blue:0.24 alpha:0.15],
-        [UIColor colorWithRed:0.72 green:0.17 blue:0.17 alpha:1]);
-    [denyAll addTarget:self action:@selector(denyAllTapped) forControlEvents:UIControlEventTouchUpInside];
+    UILabel *funcTitle = [[UILabel alloc] init];
+    funcTitle.text = @"按功能一键开关（应用到全部应用）";
+    funcTitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    funcTitle.textColor = [UIColor colorWithWhite:0.30 alpha:1];
 
-    UIStackView *batchRow = [[UIStackView alloc] initWithArrangedSubviews:@[allowAll, denyAll]];
-    batchRow.axis = UILayoutConstraintAxisHorizontal;
-    batchRow.distribution = UIStackViewDistributionFillEqually;
-    batchRow.spacing = 10;
+    _funcSwitches = [NSMutableArray array];
+    NSMutableArray *cells = [NSMutableArray array];
+    for (NSInteger p = 0; p < PMPermCount; p++) {
+        UILabel *lbl = [[UILabel alloc] init];
+        lbl.text = PM_permName(p);
+        lbl.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+        lbl.textColor = [UIColor colorWithWhite:0.18 alpha:1];
+        [lbl setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+
+        UISwitch *sw = [[UISwitch alloc] init];
+        sw.tag = p;
+        sw.transform = CGAffineTransformMakeScale(0.82, 0.82);
+        sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
+        [sw addTarget:self action:@selector(funcSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+        [_funcSwitches addObject:sw];
+
+        UIStackView *cell = [[UIStackView alloc] initWithArrangedSubviews:@[lbl, sw]];
+        cell.axis = UILayoutConstraintAxisHorizontal;
+        cell.alignment = UIStackViewAlignmentCenter;
+        cell.spacing = 8;
+        [cells addObject:cell];
+    }
+    // 两列网格：左列放偶数项，右列放奇数项
+    NSMutableArray *left = [NSMutableArray array], *right = [NSMutableArray array];
+    for (NSInteger p = 0; p < cells.count; p++) {
+        (p % 2 == 0) ? [left addObject:cells[p]] : [right addObject:cells[p]];
+    }
+    while (left.count > right.count) [right addObject:[UIView new]];
+    while (right.count > left.count) [left addObject:[UIView new]];
+    UIStackView *leftCol = [[UIStackView alloc] initWithArrangedSubviews:left];
+    leftCol.axis = UILayoutConstraintAxisVertical; leftCol.spacing = 10; leftCol.alignment = UIStackViewAlignmentFill;
+    UIStackView *rightCol = [[UIStackView alloc] initWithArrangedSubviews:right];
+    rightCol.axis = UILayoutConstraintAxisVertical; rightCol.spacing = 10; rightCol.alignment = UIStackViewAlignmentFill;
+    UIStackView *grid = [[UIStackView alloc] initWithArrangedSubviews:@[leftCol, rightCol]];
+    grid.axis = UILayoutConstraintAxisHorizontal; grid.spacing = 18; grid.distribution = UIStackViewDistributionFillEqually;
+
+    UIStackView *funcStack = [[UIStackView alloc] initWithArrangedSubviews:@[funcTitle, grid]];
+    funcStack.axis = UILayoutConstraintAxisVertical; funcStack.spacing = 12;
+    funcStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [funcCard addSubview:funcStack];
+    [NSLayoutConstraint activateConstraints:@[
+        [funcStack.topAnchor constraintEqualToAnchor:funcCard.topAnchor constant:14],
+        [funcStack.leadingAnchor constraintEqualToAnchor:funcCard.leadingAnchor constant:16],
+        [funcStack.trailingAnchor constraintEqualToAnchor:funcCard.trailingAnchor constant:-16],
+        [funcStack.bottomAnchor constraintEqualToAnchor:funcCard.bottomAnchor constant:-14],
+    ]];
 
     _statLabel = [[UILabel alloc] init];
     _statLabel.font = [UIFont systemFontOfSize:12];
@@ -724,18 +770,17 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         [bottomRow.bottomAnchor constraintEqualToAnchor:bottomBar.bottomAnchor constant:-8],
     ]];
 
-    for (UIView *v in @[_tableView, batchRow, _statLabel, _searchBar, bottomBar]) {
+    for (UIView *v in @[_tableView, funcCard, _statLabel, _searchBar, bottomBar]) {
         v.translatesAutoresizingMaskIntoConstraints = NO;
         [self.view addSubview:v];
     }
 
     [NSLayoutConstraint activateConstraints:@[
-        [batchRow.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
-        [batchRow.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [batchRow.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-        [batchRow.heightAnchor constraintEqualToConstant:40],
+        [funcCard.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
+        [funcCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
+        [funcCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
 
-        [_statLabel.topAnchor constraintEqualToAnchor:batchRow.bottomAnchor constant:8],
+        [_statLabel.topAnchor constraintEqualToAnchor:funcCard.bottomAnchor constant:8],
         [_statLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
         [_statLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
 
@@ -816,6 +861,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 
     [_tableView reloadData];
     [self refreshStat];
+    [self refreshFuncSwitches];
     [self hideSpinner];
 }
 
@@ -843,26 +889,44 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     _statLabel.text = [NSString stringWithFormat:@"%@    已全开 %ld / %ld 个应用", scope, (long)on, (long)total];
 }
 
-#pragma mark - 批量
-- (void)allowAllTapped { [self batchWrite:YES]; }
-- (void)denyAllTapped  { [self batchWrite:NO]; }
-
-- (void)batchWrite:(BOOL)val {
+#pragma mark - 按功能一键开关（应用到全部应用）
+- (void)funcSwitchChanged:(UISwitch *)sender {
+    NSInteger p = sender.tag;
+    if (p < 0 || p >= PMPermCount) return;
+    BOOL on = sender.on;
+    NSInteger cnt = 0;
     for (NSMutableDictionary *app in _allApps) {
         NSString *bid = app[@"bid"];
         NSData *cs = app[@"path"] ? PM_csreq(app[@"path"]) : nil;
+        if (p == PMPermLocalNetwork) PM_lnSet(bid, on);
+        else PM_applyPerm(p, bid, on ? 2 : 0, cs);
+        // 同步内存模型，刷新卡片时保持一致
         NSMutableArray *perms = app[@"perms"];
         if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; app[@"perms"] = perms; }
-        for (NSInteger p = 0; p < PMPermCount; p++) {
-            if (p == PMPermLocalNetwork) PM_lnSet(bid, val);
-            else PM_applyPerm(p, bid, val ? 2 : 0, cs);
-            if (p < perms.count) perms[p] = @(val ? 2 : 0);
-            else [perms addObject:@(val ? 2 : 0)];
-        }
+        while (perms.count <= p) [perms addObject:@(-1)];
+        perms[p] = @(on ? 2 : 0);
+        cnt++;
     }
     [self refreshAllCards];
     [self refreshStat];
-    [self toast:[NSString stringWithFormat:@"已将 %ld 个应用权限%@", (long)_allApps.count, val ? @"全部允许" : @"全部拒绝"]];
+    [self refreshFuncSwitches];
+    [self toast:[NSString stringWithFormat:@"已将「%@」权限对 %ld 个应用%@", PM_permName(p), (long)cnt, on ? @"开启" : @"关闭"]];
+}
+
+// 刷新顶部「按功能」开关的显示状态：当某权限对所有应用都开启时为 ON，否则 OFF
+- (void)refreshFuncSwitches {
+    if (!_funcSwitches || _funcSwitches.count != PMPermCount) return;
+    for (NSInteger p = 0; p < PMPermCount; p++) {
+        NSInteger onCount = 0, total = 0;
+        for (NSDictionary *app in _allApps) {
+            NSArray *perms = app[@"perms"];
+            if (!perms || p >= perms.count) continue;
+            NSInteger st = [perms[p] integerValue];
+            total++;
+            if (st == 2 || st == 3) onCount++;
+        }
+        _funcSwitches[p].on = (total > 0 && onCount == total);
+    }
 }
 
 #pragma mark - 导入 / 导出

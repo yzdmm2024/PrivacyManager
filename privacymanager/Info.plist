@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>隐私与安全性</string>
+	<string>隐私总开关</string>
 	<key>CFBundleExecutable</key>
 	<string>PrivacyManager</string>
 	<key>CFBundleIdentifier</key>

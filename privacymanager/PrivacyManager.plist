@@ -15,7 +15,7 @@
 		<key>icon</key>
 		<string>PrivacyManager.bundle/icon.png</string>
 		<key>label</key>
-		<string>隐私与安全性</string>
+		<string>隐私总开关</string>
 	</dict>
 </dict>
 </plist>

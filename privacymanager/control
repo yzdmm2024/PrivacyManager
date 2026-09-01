@@ -1,9 +1,9 @@
 Package: com.ntm.privacymanager
-Name: 隐私与安全性
-Version: 1.0.9
+Name: 隐私总开关
+Version: 1.0.10
 Architecture: iphoneos-arm64
 Maintainer: yzdmm2024
 Author: yzdmm2024
 Section: Tweaks
-Description: 隐私与安全性：系统「设置→隐私与安全性」的实时镜像。App 列表直接取自系统 TCC 数据库（与系统面板完全一致），七个权限开关实时读写同一 TCC.db——你在此开/关，系统设置立刻同步（双向）。照片、麦克风、相机、定位、跟踪、通讯录 直写 TCC；本地网络为尽力项。支持批量允许/拒绝、单 App 重置、配置导入导出。
+Description: 隐私总开关：系统「设置→隐私与安全性」的实时镜像。App 列表直接取自系统 TCC 数据库（与系统面板完全一致），七个权限开关实时读写同一 TCC.db——你在此开/关，系统设置立刻同步（双向）。顶部「按功能一键开关」可一次性对某权限（照片/本地网络/麦克风/相机/定位/跟踪/通讯录）对全部应用开启或关闭；每个 App 卡片支持独立开关与重置。本地网络为尽力项。支持配置导入导出。
 Depends: preferenceloader
