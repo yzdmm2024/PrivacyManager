@@ -667,12 +667,9 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 - (void)buildUI {
     // ── 按功能一键开关 卡片（替代原「全部允许/全部拒绝」）──
     UIView *funcCard = [[UIView alloc] init];
-    funcCard.backgroundColor = [UIColor colorWithWhite:0.98 alpha:0.92];
-    funcCard.layer.cornerRadius = 18;
-    funcCard.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
-    funcCard.layer.shadowOpacity = 1;
-    funcCard.layer.shadowRadius = 12;
-    funcCard.layer.shadowOffset = CGSizeMake(0, 4);
+    funcCard.backgroundColor = [UIColor clearColor];
+    funcCard.layer.cornerRadius = 0;
+    funcCard.layer.shadowOpacity = 0;
 
     UILabel *funcTitle = [[UILabel alloc] init];
     funcTitle.text = @"按功能一键开关（应用到全部应用）";
@@ -694,6 +691,8 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         sw.tag = p;
         sw.transform = CGAffineTransformMakeScale(0.62, 0.62);
         sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
+        sw.tintColor = [UIColor colorWithWhite:0.82 alpha:1];   // OFF 态浅灰，避免渲染成黑
+        sw.backgroundColor = [UIColor clearColor];
         [sw addTarget:self action:@selector(funcSwitchChanged:) forControlEvents:UIControlEventValueChanged];
         [_funcSwitches addObject:sw];
 
@@ -771,11 +770,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     }
 
     [NSLayoutConstraint activateConstraints:@[
-        [funcCard.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:12],
-        [funcCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:16],
-        [funcCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-16],
-
-        [_statLabel.topAnchor constraintEqualToAnchor:funcCard.bottomAnchor constant:8],
+        [_statLabel.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],
         [_statLabel.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:20],
         [_statLabel.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-20],
 
@@ -783,7 +778,11 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         [_searchBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:8],
         [_searchBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-8],
 
-        [_tableView.topAnchor constraintEqualToAnchor:_searchBar.bottomAnchor constant:6],
+        [funcCard.topAnchor constraintEqualToAnchor:_searchBar.bottomAnchor constant:10],
+        [funcCard.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:12],
+        [funcCard.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-12],
+
+        [_tableView.topAnchor constraintEqualToAnchor:funcCard.bottomAnchor constant:6],
         [_tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [_tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
         [_tableView.bottomAnchor constraintEqualToAnchor:bottomBar.topAnchor constant:-4],
