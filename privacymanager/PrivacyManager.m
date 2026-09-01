@@ -114,7 +114,17 @@ static sqlite3 *PM_openTCC(void) {
         if (db) sqlite3_close(db);
         return NULL;
     }
+    // iOS 16 的 TCC.db 是 WAL 模式：tccd 持有主库连接，直接写会被隔离在 -wal 文件里，
+    // 不 checkpoint 回主库则系统(及 tccd)读不到，导致开关“写了但没生效”。
+    // busy_timeout 防止被 tccd 的写锁打断；wal_checkpoint 由调用方在写后执行。
+    sqlite3_exec(db, "PRAGMA busy_timeout=5000", NULL, NULL, NULL);
     return db;
+}
+
+// 写后强制把 WAL 落回主库，让 tccd 与系统设置能立即看到变更
+static void PM_checkpoint(sqlite3 *db) {
+    if (!db) return;
+    sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", NULL, NULL, NULL);
 }
 
 // 探测 access 表的列名，兼容 iOS 15/16/17 不同 schema
@@ -263,6 +273,7 @@ static BOOL PM_setStatus(NSString *svc, NSString *client, NSInteger val, NSData 
     } @catch (NSException *e) {
         ok = NO;
     }
+    PM_checkpoint(db);
     sqlite3_close(db);
     return ok;
 }
@@ -280,6 +291,7 @@ static void PM_resetPerm(NSInteger p, NSString *client) {
         }
         sqlite3_finalize(s);
     }
+    PM_checkpoint(db);
     sqlite3_close(db);
 }
 
