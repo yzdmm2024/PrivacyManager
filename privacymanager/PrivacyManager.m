@@ -36,10 +36,11 @@
 - (void)setAction:(SEL)action;
 @end
 
-// PSSpecifier cell 类型常量（与 Preferences.framework 一致）
+// PSSpecifier cell 类型常量（与 Preferences.framework 完全一致，抄错会崩）
+// 真实值：TitleValue=0, Group=1, Switch=2, Button=3, EditText=4, Segment=5, StaticText=6, Link=7
 enum {
-    PMCellGroup = 0,
-    PMCellTitleValue = 1,
+    PMCellTitleValue = 0,
+    PMCellGroup = 1,
     PMCellSwitch = 2,
     PMCellButton = 3,
     PMCellEditText = 4,
@@ -370,7 +371,7 @@ static NSArray *PM_enumerateApps(void) {
     NSArray *svcs = PM_privacyServices();
     NSMutableString *inList = [NSMutableString string];
     for (NSUInteger i = 0; i < svcs.count; i++) {
-        [inList appendFormat:@"%@%@", (i ? @"," : @""), svcs[i]];
+        [inList appendFormat:@"%@'%@'", (i ? @"," : @""), svcs[i]];
     }
     NSString *sql = [NSString stringWithFormat:
         @"SELECT DISTINCT client FROM access WHERE client_type=0 AND client IS NOT NULL AND client!='' AND service IN (%@)", inList];
@@ -445,6 +446,7 @@ static NSArray *PM_enumerateApps(void) {
 #pragma mark - 构建 specifiers（面板内容）
 - (id)specifiers {
     if (!_specs) {
+     @try {
         _apps = PM_enumerateApps();
         _specs = [NSMutableArray array];
 
@@ -485,6 +487,10 @@ static NSArray *PM_enumerateApps(void) {
         }
 
         [self diag:[NSString stringWithFormat:@"[specifiers] 枚举到 %ld 个 App（主源 TCC.db）", (long)_apps.count]];
+     } @catch (NSException *e) {
+        [self diag:[NSString stringWithFormat:@"[specifiers EXCEPTION] %@: %@", e.name, e.reason]];
+        if (!_specs) _specs = [NSMutableArray array];
+     }
     }
     return _specs;
 }
@@ -655,9 +661,13 @@ static void PM_diagnose_load(void) {
                 sqlite3 *db = PM_openTCC();
                 if (db) {
                     sqlite3_stmt *s = NULL;
+                    // 安全拼接带引号的 IN 列表
+                    NSMutableString *inL = [NSMutableString string];
+                    NSArray *psv = PM_privacyServices();
+                    for (NSUInteger i = 0; i < psv.count; i++)
+                        [inL appendFormat:@"%@'%@'", (i ? @"," : @""), psv[i]];
                     NSString *chk = [NSString stringWithFormat:
-                        @"SELECT COUNT(DISTINCT client) FROM access WHERE client_type=0 AND service IN (%@)",
-                        [PM_privacyServices() componentsJoinedByString:@","]];
+                        @"SELECT COUNT(DISTINCT client) FROM access WHERE client_type=0 AND service IN (%@)", inL];
                     if (sqlite3_prepare_v2(db, [chk UTF8String], -1, &s, NULL) == SQLITE_OK) {
                         if (sqlite3_step(s) == SQLITE_ROW)
                             [log appendFormat:@"TCC.db 中隐私类 App 数: %d\n", sqlite3_column_int(s, 0)];
