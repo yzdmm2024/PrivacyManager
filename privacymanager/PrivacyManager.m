@@ -432,9 +432,12 @@ static void PM_fillPerms(NSMutableDictionary *app) {
 @property (nonatomic, strong) UIImageView *iconView;
 @property (nonatomic, strong) UISwitch *masterSwitch;
 @property (nonatomic, strong) NSMutableArray<UISwitch *> *permSwitches;
+@property (nonatomic, strong) NSMutableArray<UILabel *> *permLabels;
+@property (nonatomic, assign) NSInteger highlightPerm; // 当前筛选高亮的权限（-1 = 无）
 @property (nonatomic, copy) void (^onChange)(NSString *appId);
 - (instancetype)initWithApp:(NSMutableDictionary *)app;
 - (void)reloadFromModel;
+- (void)applyHighlight;
 @end
 
 @implementation PMPermCardView
@@ -444,6 +447,7 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     if (self) {
         _app = app;
         _permSwitches = [NSMutableArray array];
+        _highlightPerm = NSNotFound;
         [self buildUI];
     }
     return self;
@@ -496,6 +500,7 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     header.spacing = 10;
 
     // ── 权限开关行：7 个权限横排 ──
+    _permLabels = [NSMutableArray array];
     NSMutableArray *permItems = [NSMutableArray array];
     for (NSInteger p = 0; p < PMPermCount; p++) {
         UILabel *lbl = [[UILabel alloc] init];
@@ -503,6 +508,7 @@ static void PM_fillPerms(NSMutableDictionary *app) {
         lbl.font = [UIFont systemFontOfSize:10];
         lbl.textColor = [UIColor colorWithWhite:0.35 alpha:1];
         lbl.textAlignment = NSTextAlignmentCenter;
+        [_permLabels addObject:lbl];
 
         UISwitch *sw = [[UISwitch alloc] init];
         sw.transform = CGAffineTransformMakeScale(0.66, 0.66);
@@ -614,6 +620,21 @@ static void PM_fillPerms(NSMutableDictionary *app) {
         if (!on) allOn = NO;
     }
     _masterSwitch.on = allOn;
+    [self applyHighlight];
+}
+
+// 高亮当前筛选的权限名，让用户在卡片里一眼看到该权限列
+- (void)applyHighlight {
+    for (NSInteger p = 0; p < _permLabels.count; p++) {
+        UILabel *l = _permLabels[p];
+        if (p == _highlightPerm) {
+            l.textColor = [UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1];
+            l.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+        } else {
+            l.textColor = [UIColor colorWithWhite:0.35 alpha:1];
+            l.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
+        }
+    }
 }
 
 @end
@@ -630,7 +651,9 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     NSArray *_allApps;   // NSMutableDictionary 数组（含 perms）
     NSArray *_curApps;
     NSString *_searchText;
-    NSMutableArray<UISwitch *> *_funcSwitches; // 7 个「按功能」开关
+    NSMutableArray<UISwitch *> *_funcSwitches;  // 7 个「按功能」开关
+    NSMutableArray<UIButton *> *_funcLabels;    // 7 个「按功能」标签（点按 = 筛选）
+    NSInteger _filterPerm;                      // 当前筛选的权限（-1 = 无）
 }
 
 // PreferenceLoader/PSListController 集成方法（自定义 UI 不使用，仅避免 unrecognized selector 崩溃）
@@ -657,6 +680,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
     self.view.backgroundColor = [UIColor colorWithRed:0.95 green:0.96 blue:0.98 alpha:1];
     _searchText = @"";
+    _filterPerm = NSNotFound;
 
     [self buildUI];
 
@@ -696,54 +720,56 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     funcCard.layer.cornerRadius = 0;
     funcCard.layer.shadowOpacity = 0;
 
-    UILabel *funcTitle = [[UILabel alloc] init];
-    funcTitle.text = @"按功能一键开关（应用到全部应用）";
-    funcTitle.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    funcTitle.textColor = [UIColor colorWithWhite:0.30 alpha:1];
-
     _funcSwitches = [NSMutableArray array];
+    _funcLabels = [NSMutableArray array];
     NSMutableArray *cells = [NSMutableArray array];
     for (NSInteger p = 0; p < PMPermCount; p++) {
-        UILabel *lbl = [[UILabel alloc] init];
-        lbl.text = PM_permName(p);
-        lbl.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
-        lbl.textColor = [UIColor colorWithWhite:0.18 alpha:1];
-        lbl.textAlignment = NSTextAlignmentCenter;
-        lbl.adjustsFontSizeToFitWidth = YES;
-        lbl.minimumScaleFactor = 0.7;
+        // 权限名做成按钮：点按 = 按该权限筛选下方列表
+        UIButton *lblBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        [lblBtn setTitle:PM_permName(p) forState:UIControlStateNormal];
+        [lblBtn setTitleColor:[UIColor colorWithWhite:0.18 alpha:1] forState:UIControlStateNormal];
+        lblBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        lblBtn.titleLabel.textAlignment = NSTextAlignmentCenter;
+        lblBtn.titleLabel.adjustsFontSizeToFitWidth = YES;
+        lblBtn.titleLabel.minimumScaleFactor = 0.6;
+        lblBtn.titleLabel.numberOfLines = 2;
+        lblBtn.tag = p;
+        [lblBtn addTarget:self action:@selector(filterTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [_funcLabels addObject:lblBtn];
 
         UISwitch *sw = [[UISwitch alloc] init];
         sw.tag = p;
-        sw.transform = CGAffineTransformMakeScale(0.62, 0.62);
+        sw.transform = CGAffineTransformMakeScale(0.82, 0.82);
         sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
         sw.tintColor = [UIColor colorWithWhite:0.82 alpha:1];   // OFF 态浅灰，避免渲染成黑
         sw.backgroundColor = [UIColor clearColor];
         [sw addTarget:self action:@selector(funcSwitchChanged:) forControlEvents:UIControlEventValueChanged];
         [_funcSwitches addObject:sw];
 
-        UIStackView *cell = [[UIStackView alloc] initWithArrangedSubviews:@[lbl, sw]];
+        // 标签在上、开关在下，整体作为一个可点区域
+        UIStackView *cell = [[UIStackView alloc] initWithArrangedSubviews:@[lblBtn, sw]];
         cell.axis = UILayoutConstraintAxisVertical;
         cell.alignment = UIStackViewAlignmentCenter;
-        cell.spacing = 3;
+        cell.spacing = 4;
         [cells addObject:cell];
     }
-    // 单横排：7 个权限开关一字排开
+    // 单横排：7 个权限开关一字排开，加大间距避免误触
     UIStackView *grid = [[UIStackView alloc] initWithArrangedSubviews:cells];
     grid.axis = UILayoutConstraintAxisHorizontal;
-    grid.spacing = 1;
+    grid.spacing = 10;
     grid.distribution = UIStackViewDistributionFillEqually;
     grid.alignment = UIStackViewAlignmentTop;
 
-    UIStackView *funcStack = [[UIStackView alloc] initWithArrangedSubviews:@[funcTitle, grid]];
-    funcStack.axis = UILayoutConstraintAxisVertical; funcStack.spacing = 12;
-    funcStack.translatesAutoresizingMaskIntoConstraints = NO;
-    [funcCard addSubview:funcStack];
+    // 仅保留单排开关，去掉标题/提示文字，压缩上下留白
+    grid.translatesAutoresizingMaskIntoConstraints = NO;
+    [funcCard addSubview:grid];
     [NSLayoutConstraint activateConstraints:@[
-        [funcStack.topAnchor constraintEqualToAnchor:funcCard.topAnchor constant:14],
-        [funcStack.leadingAnchor constraintEqualToAnchor:funcCard.leadingAnchor constant:16],
-        [funcStack.trailingAnchor constraintEqualToAnchor:funcCard.trailingAnchor constant:-16],
-        [funcStack.bottomAnchor constraintEqualToAnchor:funcCard.bottomAnchor constant:-14],
+        [grid.topAnchor constraintEqualToAnchor:funcCard.topAnchor constant:8],
+        [grid.leadingAnchor constraintEqualToAnchor:funcCard.leadingAnchor constant:12],
+        [grid.trailingAnchor constraintEqualToAnchor:funcCard.trailingAnchor constant:-12],
+        [grid.bottomAnchor constraintEqualToAnchor:funcCard.bottomAnchor constant:-8],
     ]];
+    [self updateFilterUI];
 
     _statLabel = [[UILabel alloc] init];
     _statLabel.font = [UIFont systemFontOfSize:12];
@@ -841,6 +867,8 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     NSMutableDictionary *app = _curApps[indexPath.row];
     PMPermCardView *card = [[PMPermCardView alloc] initWithApp:app];
     card.translatesAutoresizingMaskIntoConstraints = NO;
+    card.highlightPerm = _filterPerm;   // 筛选时高亮对应权限列
+    [card reloadFromModel];             // 应用高亮
     __weak typeof(self) ws = self;
     card.onChange = ^(NSString *aid) { [ws refreshStat]; };
     [cell.contentView addSubview:card];
@@ -865,11 +893,33 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         }
         [filtered addObject:app];
     }
+
+    // ── 按权限筛选：仅保留「使用过该权限」的 App，并把未开启(需关注)的排前面 ──
+    if (_filterPerm != NSNotFound) {
+        NSMutableArray *ff = [NSMutableArray array];
+        for (NSMutableDictionary *app in filtered) {
+            if ([self appHasPermHistory:app perm:_filterPerm]) [ff addObject:app];
+        }
+        filtered = ff;
+        [filtered sortUsingComparator:^NSComparisonResult(NSMutableDictionary *a, NSMutableDictionary *b) {
+            NSArray *pa = a[@"perms"], *pb = b[@"perms"];
+            NSInteger sa = (pa && _filterPerm < pa.count) ? [pa[_filterPerm] integerValue] : -1;
+            NSInteger sb = (pb && _filterPerm < pb.count) ? [pb[_filterPerm] integerValue] : -1;
+            BOOL oa = (sa == 2 || sa == 3), ob = (sb == 2 || sb == 3);
+            if (oa == ob) return NSOrderedSame;
+            return oa ? NSOrderedDescending : NSOrderedAscending; // 关着的(需关注)置顶
+        }];
+    }
     _curApps = filtered;
 
     if (!filtered.count) {
         UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 260, 80)];
-        empty.text = _allApps.count ? @"没有匹配的应用" : @"暂无应用（TCC 中无隐私类记录）";
+        if (_filterPerm != NSNotFound)
+            empty.text = [NSString stringWithFormat:@"没有使用「%@」的应用", PM_permName(_filterPerm)];
+        else if (_searchText.length)
+            empty.text = @"没有匹配的应用";
+        else
+            empty.text = @"暂无应用（TCC 中无隐私类记录）";
         empty.font = [UIFont systemFontOfSize:14];
         empty.textColor = [UIColor colorWithWhite:0.55 alpha:1];
         empty.textAlignment = NSTextAlignmentCenter;
@@ -904,7 +954,13 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         if (all) on++;
         total++;
     }
-    NSString *scope = _searchText.length ? [NSString stringWithFormat:@"搜索：%@", _searchText] : @"全部应用";
+    NSString *scope;
+    if (_filterPerm != NSNotFound)
+        scope = [NSString stringWithFormat:@"筛选：%@（点标签取消）", PM_permName(_filterPerm)];
+    else if (_searchText.length)
+        scope = [NSString stringWithFormat:@"搜索：%@", _searchText];
+    else
+        scope = @"全部应用";
     _statLabel.text = [NSString stringWithFormat:@"%@    已全开 %ld / %ld 个应用", scope, (long)on, (long)total];
 }
 
@@ -945,6 +1001,44 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
             if (st == 2 || st == 3) onCount++;
         }
         _funcSwitches[p].on = (total > 0 && onCount == total);
+    }
+}
+
+#pragma mark - 按权限筛选（点权限名 → 下方只显示使用该权限的 App）
+// 该 App 是否在 TCC 中留有该权限的记录（即“使用过”该权限）：有记录才列入筛选结果
+- (BOOL)appHasPermHistory:(NSMutableDictionary *)app perm:(NSInteger)p {
+    NSString *bid = app[@"bid"];
+    if (p == PMPermLocalNetwork)
+        return ([PM_selfPrefs() objectForKey:PM_lnKey(bid)] != nil);
+    // TCC 权限：perms 中 -1 表示无记录，其余(0/2/3)均表示「使用过该权限」；优先用内存缓存避免逐个查库
+    NSArray *perms = app[@"perms"];
+    if (perms && p < perms.count) return ([perms[p] integerValue] != -1);
+    for (NSString *svc in PM_permServices(p)) {
+        if (PM_status(svc, bid) != -1) return YES;
+    }
+    return NO;
+}
+
+// 点权限名切换筛选；点已激活的权限名则取消筛选
+- (void)filterTapped:(UIButton *)sender {
+    NSInteger p = sender.tag;
+    _filterPerm = (_filterPerm == p) ? NSNotFound : p;
+    [self updateFilterUI];
+    [self reloadList];
+}
+
+// 高亮当前筛选的权限名，其余恢复常态，视觉上区分“当前在按哪个权限看”
+- (void)updateFilterUI {
+    if (!_funcLabels || _funcLabels.count != PMPermCount) return;
+    for (NSInteger p = 0; p < PMPermCount; p++) {
+        UIButton *b = _funcLabels[p];
+        if (p == _filterPerm) {
+            [b setTitleColor:[UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1] forState:UIControlStateNormal];
+            b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
+        } else {
+            [b setTitleColor:[UIColor colorWithWhite:0.18 alpha:1] forState:UIControlStateNormal];
+            b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        }
     }
 }
 
