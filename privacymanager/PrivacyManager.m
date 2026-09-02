@@ -726,13 +726,19 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     for (NSInteger p = 0; p < PMPermCount; p++) {
         // 权限名做成按钮：点按 = 按该权限筛选下方列表
         UIButton *lblBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        [lblBtn setTitle:PM_permName(p) forState:UIControlStateNormal];
+        // 超过 2 个字在单排里会被压缩，按字数中分两行（如「本地网络」→「本地／网络」）
+        NSString *pn = PM_permName(p);
+        if (pn.length > 2) {
+            NSUInteger mid = pn.length / 2;
+            pn = [NSString stringWithFormat:@"%@\n%@", [pn substringToIndex:mid], [pn substringFromIndex:mid]];
+        }
+        [lblBtn setTitle:pn forState:UIControlStateNormal];
         [lblBtn setTitleColor:[UIColor colorWithWhite:0.18 alpha:1] forState:UIControlStateNormal];
         lblBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         lblBtn.titleLabel.textAlignment = NSTextAlignmentCenter;
-        lblBtn.titleLabel.adjustsFontSizeToFitWidth = YES;
-        lblBtn.titleLabel.minimumScaleFactor = 0.6;
-        lblBtn.titleLabel.numberOfLines = 2;
+        lblBtn.titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+        lblBtn.titleLabel.adjustsFontSizeToFitWidth = NO;  // 不缩放，靠换行显示完整
+        lblBtn.titleLabel.numberOfLines = 0;
         lblBtn.tag = p;
         [lblBtn addTarget:self action:@selector(filterTapped:) forControlEvents:UIControlEventTouchUpInside];
         [_funcLabels addObject:lblBtn];
@@ -896,26 +902,19 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 
     // ── 按权限筛选：仅保留「使用过该权限」的 App，并把未开启(需关注)的排前面 ──
     if (_filterPerm != NSNotFound) {
+        // 仅显示「已开启」该权限的 App，未开启的隐藏
         NSMutableArray *ff = [NSMutableArray array];
         for (NSMutableDictionary *app in filtered) {
-            if ([self appHasPermHistory:app perm:_filterPerm]) [ff addObject:app];
+            if ([self appPermEnabled:app perm:_filterPerm]) [ff addObject:app];
         }
         filtered = ff;
-        [filtered sortUsingComparator:^NSComparisonResult(NSMutableDictionary *a, NSMutableDictionary *b) {
-            NSArray *pa = a[@"perms"], *pb = b[@"perms"];
-            NSInteger sa = (pa && _filterPerm < pa.count) ? [pa[_filterPerm] integerValue] : -1;
-            NSInteger sb = (pb && _filterPerm < pb.count) ? [pb[_filterPerm] integerValue] : -1;
-            BOOL oa = (sa == 2 || sa == 3), ob = (sb == 2 || sb == 3);
-            if (oa == ob) return NSOrderedSame;
-            return oa ? NSOrderedDescending : NSOrderedAscending; // 关着的(需关注)置顶
-        }];
     }
     _curApps = filtered;
 
     if (!filtered.count) {
         UILabel *empty = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 260, 80)];
         if (_filterPerm != NSNotFound)
-            empty.text = [NSString stringWithFormat:@"没有使用「%@」的应用", PM_permName(_filterPerm)];
+            empty.text = [NSString stringWithFormat:@"没有已开启「%@」的应用", PM_permName(_filterPerm)];
         else if (_searchText.length)
             empty.text = @"没有匹配的应用";
         else
@@ -956,7 +955,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     }
     NSString *scope;
     if (_filterPerm != NSNotFound)
-        scope = [NSString stringWithFormat:@"筛选：%@（点标签取消）", PM_permName(_filterPerm)];
+        scope = [NSString stringWithFormat:@"已开启筛选：%@（点标签取消）", PM_permName(_filterPerm)];
     else if (_searchText.length)
         scope = [NSString stringWithFormat:@"搜索：%@", _searchText];
     else
@@ -1004,17 +1003,23 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     }
 }
 
-#pragma mark - 按权限筛选（点权限名 → 下方只显示使用该权限的 App）
-// 该 App 是否在 TCC 中留有该权限的记录（即“使用过”该权限）：有记录才列入筛选结果
-- (BOOL)appHasPermHistory:(NSMutableDictionary *)app perm:(NSInteger)p {
+#pragma mark - 按权限筛选（点权限名 → 下方只显示该权限已开启的 App）
+// 该 App 的该权限当前是否为「已开启」(2/3)：仅开启的才列入筛选结果，未开启的隐藏
+- (BOOL)appPermEnabled:(NSMutableDictionary *)app perm:(NSInteger)p {
     NSString *bid = app[@"bid"];
-    if (p == PMPermLocalNetwork)
-        return ([PM_selfPrefs() objectForKey:PM_lnKey(bid)] != nil);
-    // TCC 权限：perms 中 -1 表示无记录，其余(0/2/3)均表示「使用过该权限」；优先用内存缓存避免逐个查库
     NSArray *perms = app[@"perms"];
-    if (perms && p < perms.count) return ([perms[p] integerValue] != -1);
+    if (p == PMPermLocalNetwork) {
+        // 本地网络不在 TCC，直接看存储值
+        return (PM_lnStatus(bid) == 2);
+    }
+    // TCC 权限：优先用内存缓存
+    if (perms && p < perms.count) {
+        NSInteger st = [perms[p] integerValue];
+        return (st == 2 || st == 3);
+    }
     for (NSString *svc in PM_permServices(p)) {
-        if (PM_status(svc, bid) != -1) return YES;
+        NSInteger st = PM_status(svc, bid);
+        if (st == 2 || st == 3) return YES;
     }
     return NO;
 }
