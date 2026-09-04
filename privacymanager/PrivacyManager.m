@@ -716,9 +716,10 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 - (void)buildUI {
     // ── 按功能一键开关 卡片（替代原「全部允许/全部拒绝」）──
     UIView *funcCard = [[UIView alloc] init];
-    funcCard.backgroundColor = [UIColor clearColor];
-    funcCard.layer.cornerRadius = 0;
-    funcCard.layer.shadowOpacity = 0;
+    // 浅色圆角底卡，让一排开关落在整洁的卡片上，避免悬浮感
+    funcCard.backgroundColor = [UIColor colorWithWhite:1 alpha:0.72];
+    funcCard.layer.cornerRadius = 14;
+    funcCard.clipsToBounds = YES;
 
     _funcSwitches = [NSMutableArray array];
     _funcLabels = [NSMutableArray array];
@@ -726,19 +727,24 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     for (NSInteger p = 0; p < PMPermCount; p++) {
         // 权限名做成按钮：点按 = 按该权限筛选下方列表
         UIButton *lblBtn = [UIButton buttonWithType:UIButtonTypeSystem];
-        // 超过 2 个字在单排里会被压缩，按字数中分两行（如「本地网络」→「本地／网络」）
         NSString *pn = PM_permName(p);
+        // 统一占满两行居中——无论名称 2 字还是 3 字都占同样高度，
+        // 7 个开关才能底部严格对齐（修旧版「本地网络折两行、照片一行」导致的开关上下错落）
         if (pn.length > 2) {
             NSUInteger mid = pn.length / 2;
             pn = [NSString stringWithFormat:@"%@\n%@", [pn substringToIndex:mid], [pn substringFromIndex:mid]];
+        } else {
+            pn = [NSString stringWithFormat:@"%@\n ", pn];
         }
         [lblBtn setTitle:pn forState:UIControlStateNormal];
         [lblBtn setTitleColor:[UIColor colorWithWhite:0.18 alpha:1] forState:UIControlStateNormal];
         lblBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         lblBtn.titleLabel.textAlignment = NSTextAlignmentCenter;
-        lblBtn.titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+        lblBtn.titleLabel.lineBreakMode = NSLineBreakByCharWrapping;
         lblBtn.titleLabel.adjustsFontSizeToFitWidth = NO;  // 不缩放，靠换行显示完整
-        lblBtn.titleLabel.numberOfLines = 0;
+        lblBtn.titleLabel.numberOfLines = 2;
+        // 固定标签区高度=两行文字，保证整排 7 个开关在同一水平线
+        [lblBtn.heightAnchor constraintEqualToConstant:30].active = YES;
         lblBtn.tag = p;
         [lblBtn addTarget:self action:@selector(filterTapped:) forControlEvents:UIControlEventTouchUpInside];
         [_funcLabels addObject:lblBtn];
