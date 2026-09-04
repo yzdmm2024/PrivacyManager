@@ -11,6 +11,7 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
@@ -86,16 +87,16 @@ static BOOL PM_permIsTCC(NSInteger p) {
     return PM_permServices(p).count > 0;
 }
 
-#pragma mark - 深色主题配色（暖橙/珊瑚 强调）
-static UIColor *PM_accent(void)      { return [UIColor colorWithRed:1.00 green:0.47 blue:0.35 alpha:1]; }  // 珊瑚橙
-static UIColor *PM_accentSoft(void)  { return [UIColor colorWithRed:1.00 green:0.68 blue:0.55 alpha:1]; }  // 浅珊瑚（高亮文本）
-static UIColor *PM_bg(void)          { return [UIColor colorWithWhite:0.08 alpha:1]; }                     // 页面深色底
-static UIColor *PM_card(void)        { return [UIColor colorWithWhite:0.17 alpha:1]; }                     // 卡片
-static UIColor *PM_cardSoft(void)    { return [UIColor colorWithWhite:0.14 alpha:0.9]; }                   // 顶部功能卡
-static UIColor *PM_textMain(void)    { return [UIColor colorWithWhite:0.93 alpha:1]; }                     // 主文字
-static UIColor *PM_textSub(void)     { return [UIColor colorWithWhite:0.62 alpha:1]; }                     // 次级
-static UIColor *PM_textDim(void)     { return [UIColor colorWithWhite:0.45 alpha:1]; }                     // 弱
-static UIColor *PM_switchOff(void)   { return [UIColor colorWithWhite:0.28 alpha:1]; }                     // 开关 OFF 底
+#pragma mark - 浅色玻璃贴片 配色（天蓝 强调）
+static UIColor *PM_accent(void)      { return [UIColor colorWithRed:0.23 green:0.54 blue:0.90 alpha:1]; } // 天蓝 #3A8AE6
+static UIColor *PM_accentSoft(void)  { return [UIColor colorWithRed:0.19 green:0.50 blue:0.86 alpha:1]; } // 深一档天蓝（高亮文本）
+static UIColor *PM_bg(void)          { return [UIColor colorWithRed:0.93 green:0.96 blue:1.0 alpha:1]; }    // 页面渐变上层（低饱和蓝）
+static UIColor *PM_card(void)        { return [UIColor colorWithWhite:1 alpha:0.66]; }                     // 半透明白卡（玻璃）
+static UIColor *PM_cardSoft(void)    { return [UIColor colorWithWhite:1 alpha:0.52]; }                     // 顶部功能卡（更透）
+static UIColor *PM_textMain(void)    { return [UIColor colorWithWhite:0.13 alpha:1]; }                     // 主文字
+static UIColor *PM_textSub(void)     { return [UIColor colorWithWhite:0.42 alpha:1]; }                     // 次级
+static UIColor *PM_textDim(void)     { return [UIColor colorWithWhite:0.56 alpha:1]; }                     // 弱
+static UIColor *PM_switchOff(void)   { return [UIColor colorWithWhite:0.85 alpha:1]; }                     // 开关 OFF 底
 
 // 用于「枚举 App」的隐私类 service 全集（与系统隐私面板对应）
 static NSArray *PM_privacyServices(void) {
@@ -468,19 +469,19 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     self.backgroundColor = PM_card();
     self.layer.cornerRadius = 18;
     self.layer.masksToBounds = NO;
-    self.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;   // 1px 发丝描边提升深色下的层次
-    self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.07].CGColor;
-    self.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.5].CGColor;
-    self.layer.shadowOpacity = 0.4;
-    self.layer.shadowRadius = 14;
-    self.layer.shadowOffset = CGSizeMake(0, 5);
+    self.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;   // 1px 高光描边，玻璃质感
+    self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.7].CGColor;
+    self.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.14].CGColor;
+    self.layer.shadowOpacity = 1;
+    self.layer.shadowRadius = 16;
+    self.layer.shadowOffset = CGSizeMake(0, 6);
 
     // ── 头部行：图标 + 名称 + 重置 + 总开关 ──
     _iconView = [[UIImageView alloc] init];
     _iconView.contentMode = UIViewContentModeScaleAspectFill;
     _iconView.layer.cornerRadius = 9;
     _iconView.clipsToBounds = YES;
-    _iconView.backgroundColor = [UIColor colorWithWhite:0.26 alpha:1];
+    _iconView.backgroundColor = [UIColor colorWithWhite:0.9 alpha:0.6];
     [_iconView.widthAnchor constraintEqualToConstant:36].active = YES;
     [_iconView.heightAnchor constraintEqualToConstant:36].active = YES;
     [self loadIconAsync];
@@ -690,8 +691,17 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"隐私总开关";
-    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;   // 强制深色，与自绘 UI 一致
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;   // 强制浅色，与自绘 UI 一致
     self.view.backgroundColor = PM_bg();
+    // 浅色玻璃贴片：低饱和柔和渐变背景
+    CAGradientLayer *bg = [CAGradientLayer layer];
+    bg.colors = @[(id)PM_bg().CGColor,
+                  (id)[UIColor colorWithRed:0.88 green:0.93 blue:0.99 alpha:1].CGColor];
+    bg.startPoint = CGPointMake(0, 0);
+    bg.endPoint = CGPointMake(0.65, 1);
+    bg.frame = self.view.bounds;
+    bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self.view.layer insertSublayer:bg atIndex:0];
     _searchText = @"";
     _filterPerm = NSNotFound;
 
@@ -729,7 +739,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 - (void)buildUI {
     // ── 按功能一键开关 卡片（替代原「全部允许/全部拒绝」）──
     UIView *funcCard = [[UIView alloc] init];
-    // 深色圆角底卡，让一排开关落在整洁的卡片上，避免悬浮感
+    // 浅色玻璃圆角底卡，让一排开关落在整洁的卡片上，避免悬浮感
     funcCard.backgroundColor = PM_cardSoft();
     funcCard.layer.cornerRadius = 14;
     funcCard.clipsToBounds = YES;
@@ -816,15 +826,15 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     _tableView.contentInset = UIEdgeInsetsMake(4, 0, 80, 0);
 
     UIButton *exportBtn = PM_pillButton(@"导出配置",
-        [UIColor colorWithWhite:1 alpha:0.12], PM_accent());
+        [UIColor colorWithWhite:1 alpha:0.66], PM_accent());
     [exportBtn addTarget:self action:@selector(exportConfig) forControlEvents:UIControlEventTouchUpInside];
 
     UIButton *importBtn = PM_pillButton(@"导入配置",
-        [UIColor colorWithWhite:1 alpha:0.12], [UIColor colorWithRed:0.35 green:0.88 blue:0.68 alpha:1]);
+        [UIColor colorWithWhite:1 alpha:0.66], [UIColor colorWithRed:0.17 green:0.62 blue:0.48 alpha:1]);
     [importBtn addTarget:self action:@selector(importConfig) forControlEvents:UIControlEventTouchUpInside];
 
     UIView *bottomBar = [[UIView alloc] init];
-    bottomBar.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.96];
+    bottomBar.backgroundColor = [UIColor colorWithWhite:1 alpha:0.72];
     bottomBar.translatesAutoresizingMaskIntoConstraints = NO;
     UIStackView *bottomRow = [[UIStackView alloc] initWithArrangedSubviews:@[exportBtn, importBtn]];
     bottomRow.axis = UILayoutConstraintAxisHorizontal;
