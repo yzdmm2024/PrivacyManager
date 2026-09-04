@@ -86,6 +86,17 @@ static BOOL PM_permIsTCC(NSInteger p) {
     return PM_permServices(p).count > 0;
 }
 
+#pragma mark - 深色主题配色（暖橙/珊瑚 强调）
+static UIColor *PM_accent(void)      { return [UIColor colorWithRed:1.00 green:0.47 blue:0.35 alpha:1]; }  // 珊瑚橙
+static UIColor *PM_accentSoft(void)  { return [UIColor colorWithRed:1.00 green:0.68 blue:0.55 alpha:1]; }  // 浅珊瑚（高亮文本）
+static UIColor *PM_bg(void)          { return [UIColor colorWithWhite:0.08 alpha:1]; }                     // 页面深色底
+static UIColor *PM_card(void)        { return [UIColor colorWithWhite:0.17 alpha:1]; }                     // 卡片
+static UIColor *PM_cardSoft(void)    { return [UIColor colorWithWhite:0.14 alpha:0.9]; }                   // 顶部功能卡
+static UIColor *PM_textMain(void)    { return [UIColor colorWithWhite:0.93 alpha:1]; }                     // 主文字
+static UIColor *PM_textSub(void)     { return [UIColor colorWithWhite:0.62 alpha:1]; }                     // 次级
+static UIColor *PM_textDim(void)     { return [UIColor colorWithWhite:0.45 alpha:1]; }                     // 弱
+static UIColor *PM_switchOff(void)   { return [UIColor colorWithWhite:0.28 alpha:1]; }                     // 开关 OFF 底
+
 // 用于「枚举 App」的隐私类 service 全集（与系统隐私面板对应）
 static NSArray *PM_privacyServices(void) {
     return @[@"kTCCServicePhotos", @"kTCCServiceMicrophone", @"kTCCServiceCamera",
@@ -454,20 +465,22 @@ static void PM_fillPerms(NSMutableDictionary *app) {
 }
 
 - (void)buildUI {
-    self.backgroundColor = [UIColor colorWithWhite:0.98 alpha:0.92];
+    self.backgroundColor = PM_card();
     self.layer.cornerRadius = 18;
     self.layer.masksToBounds = NO;
-    self.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
-    self.layer.shadowOpacity = 1;
-    self.layer.shadowRadius = 12;
-    self.layer.shadowOffset = CGSizeMake(0, 4);
+    self.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;   // 1px 发丝描边提升深色下的层次
+    self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.07].CGColor;
+    self.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.5].CGColor;
+    self.layer.shadowOpacity = 0.4;
+    self.layer.shadowRadius = 14;
+    self.layer.shadowOffset = CGSizeMake(0, 5);
 
     // ── 头部行：图标 + 名称 + 重置 + 总开关 ──
     _iconView = [[UIImageView alloc] init];
     _iconView.contentMode = UIViewContentModeScaleAspectFill;
     _iconView.layer.cornerRadius = 9;
     _iconView.clipsToBounds = YES;
-    _iconView.backgroundColor = [UIColor colorWithRed:0.88 green:0.90 blue:0.95 alpha:1];
+    _iconView.backgroundColor = [UIColor colorWithWhite:0.26 alpha:1];
     [_iconView.widthAnchor constraintEqualToConstant:36].active = YES;
     [_iconView.heightAnchor constraintEqualToConstant:36].active = YES;
     [self loadIconAsync];
@@ -475,23 +488,23 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     UILabel *nameLabel = [[UILabel alloc] init];
     nameLabel.text = _app[@"name"] ?: _app[@"bid"];
     nameLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    nameLabel.textColor = [UIColor colorWithWhite:0.12 alpha:1];
+    nameLabel.textColor = PM_textMain();
     [nameLabel setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     [nameLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
 
     UIButton *resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     [resetBtn setTitle:@"重置" forState:UIControlStateNormal];
-    [resetBtn setTitleColor:[UIColor colorWithRed:0.78 green:0.28 blue:0.28 alpha:1] forState:UIControlStateNormal];
+    [resetBtn setTitleColor:PM_accent() forState:UIControlStateNormal];
     resetBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
     [resetBtn addTarget:self action:@selector(resetTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UILabel *masterLabel = [[UILabel alloc] init];
     masterLabel.text = @"总开关";
     masterLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    masterLabel.textColor = [UIColor colorWithWhite:0.40 alpha:1];
+    masterLabel.textColor = PM_textSub();
 
     _masterSwitch = [[UISwitch alloc] init];
-    _masterSwitch.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
+    _masterSwitch.onTintColor = PM_accent();
     [_masterSwitch addTarget:self action:@selector(masterChanged) forControlEvents:UIControlEventValueChanged];
 
     UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[_iconView, nameLabel, resetBtn, masterLabel, _masterSwitch]];
@@ -506,13 +519,13 @@ static void PM_fillPerms(NSMutableDictionary *app) {
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text = PM_permName(p);
         lbl.font = [UIFont systemFontOfSize:10];
-        lbl.textColor = [UIColor colorWithWhite:0.35 alpha:1];
+        lbl.textColor = PM_textSub();
         lbl.textAlignment = NSTextAlignmentCenter;
         [_permLabels addObject:lbl];
 
         UISwitch *sw = [[UISwitch alloc] init];
         sw.transform = CGAffineTransformMakeScale(0.66, 0.66);
-        sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
+        sw.onTintColor = PM_accent();
         [sw addTarget:self action:@selector(permChanged:) forControlEvents:UIControlEventValueChanged];
         [_permSwitches addObject:sw];
 
@@ -628,10 +641,10 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     for (NSInteger p = 0; p < _permLabels.count; p++) {
         UILabel *l = _permLabels[p];
         if (p == _highlightPerm) {
-            l.textColor = [UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1];
+            l.textColor = PM_accentSoft();
             l.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
         } else {
-            l.textColor = [UIColor colorWithWhite:0.35 alpha:1];
+            l.textColor = PM_textSub();
             l.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
         }
     }
@@ -677,8 +690,8 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"隐私总开关";
-    self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
-    self.view.backgroundColor = [UIColor colorWithRed:0.95 green:0.96 blue:0.98 alpha:1];
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;   // 强制深色，与自绘 UI 一致
+    self.view.backgroundColor = PM_bg();
     _searchText = @"";
     _filterPerm = NSNotFound;
 
@@ -716,8 +729,8 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 - (void)buildUI {
     // ── 按功能一键开关 卡片（替代原「全部允许/全部拒绝」）──
     UIView *funcCard = [[UIView alloc] init];
-    // 浅色圆角底卡，让一排开关落在整洁的卡片上，避免悬浮感
-    funcCard.backgroundColor = [UIColor colorWithWhite:1 alpha:0.72];
+    // 深色圆角底卡，让一排开关落在整洁的卡片上，避免悬浮感
+    funcCard.backgroundColor = PM_cardSoft();
     funcCard.layer.cornerRadius = 14;
     funcCard.clipsToBounds = YES;
 
@@ -737,7 +750,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
             pn = [NSString stringWithFormat:@"%@\n ", pn];
         }
         [lblBtn setTitle:pn forState:UIControlStateNormal];
-        [lblBtn setTitleColor:[UIColor colorWithWhite:0.18 alpha:1] forState:UIControlStateNormal];
+        [lblBtn setTitleColor:PM_textMain() forState:UIControlStateNormal];
         lblBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         lblBtn.titleLabel.textAlignment = NSTextAlignmentCenter;
         lblBtn.titleLabel.lineBreakMode = NSLineBreakByCharWrapping;
@@ -752,8 +765,8 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         UISwitch *sw = [[UISwitch alloc] init];
         sw.tag = p;
         sw.transform = CGAffineTransformMakeScale(0.82, 0.82);
-        sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
-        sw.tintColor = [UIColor colorWithWhite:0.82 alpha:1];   // OFF 态浅灰，避免渲染成黑
+        sw.onTintColor = PM_accent();
+        sw.tintColor = PM_switchOff();   // OFF 态深灰，深色下不刺眼
         sw.backgroundColor = [UIColor clearColor];
         [sw addTarget:self action:@selector(funcSwitchChanged:) forControlEvents:UIControlEventValueChanged];
         [_funcSwitches addObject:sw];
@@ -785,13 +798,14 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 
     _statLabel = [[UILabel alloc] init];
     _statLabel.font = [UIFont systemFontOfSize:12];
-    _statLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+    _statLabel.textColor = PM_textSub();
 
     _searchBar = [[UISearchBar alloc] init];
     _searchBar.placeholder = @"搜索应用名称或 Bundle ID";
     _searchBar.delegate = self;
     _searchBar.searchBarStyle = UISearchBarStyleMinimal;
     _searchBar.backgroundImage = [UIImage new];
+    _searchBar.tintColor = PM_accent();   // 光标/取消按钮珊瑚色
 
     _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     _tableView.delegate = self;
@@ -802,17 +816,15 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     _tableView.contentInset = UIEdgeInsetsMake(4, 0, 80, 0);
 
     UIButton *exportBtn = PM_pillButton(@"导出配置",
-        [UIColor colorWithRed:0.35 green:0.56 blue:1.0 alpha:0.15],
-        [UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1]);
+        [UIColor colorWithWhite:1 alpha:0.12], PM_accent());
     [exportBtn addTarget:self action:@selector(exportConfig) forControlEvents:UIControlEventTouchUpInside];
 
     UIButton *importBtn = PM_pillButton(@"导入配置",
-        [UIColor colorWithRed:0.45 green:0.78 blue:0.54 alpha:0.18],
-        [UIColor colorWithRed:0.13 green:0.55 blue:0.24 alpha:1]);
+        [UIColor colorWithWhite:1 alpha:0.12], [UIColor colorWithRed:0.35 green:0.88 blue:0.68 alpha:1]);
     [importBtn addTarget:self action:@selector(importConfig) forControlEvents:UIControlEventTouchUpInside];
 
     UIView *bottomBar = [[UIView alloc] init];
-    bottomBar.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.95];
+    bottomBar.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.96];
     bottomBar.translatesAutoresizingMaskIntoConstraints = NO;
     UIStackView *bottomRow = [[UIStackView alloc] initWithArrangedSubviews:@[exportBtn, importBtn]];
     bottomRow.axis = UILayoutConstraintAxisHorizontal;
@@ -926,7 +938,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         else
             empty.text = @"暂无应用（TCC 中无隐私类记录）";
         empty.font = [UIFont systemFontOfSize:14];
-        empty.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+        empty.textColor = PM_textDim();
         empty.textAlignment = NSTextAlignmentCenter;
         _tableView.backgroundView = empty;
     } else {
@@ -1044,10 +1056,10 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     for (NSInteger p = 0; p < PMPermCount; p++) {
         UIButton *b = _funcLabels[p];
         if (p == _filterPerm) {
-            [b setTitleColor:[UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1] forState:UIControlStateNormal];
+            [b setTitleColor:PM_accentSoft() forState:UIControlStateNormal];
             b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
         } else {
-            [b setTitleColor:[UIColor colorWithWhite:0.18 alpha:1] forState:UIControlStateNormal];
+            [b setTitleColor:PM_textSub() forState:UIControlStateNormal];
             b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         }
     }
