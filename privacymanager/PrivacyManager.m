@@ -87,7 +87,15 @@ static BOOL PM_permIsTCC(NSInteger p) {
     return PM_permServices(p).count > 0;
 }
 
+// 页面渐变背景视图：底层为 CAGradientLayer，随控制器 bounds 自动拉伸
+@interface PMGradientView : UIView
+@end
+@implementation PMGradientView
++ (Class)layerClass { return [CAGradientLayer class]; }
+@end
+
 #pragma mark - 浅色玻璃贴片 配色（天蓝 强调）
+// 以 CAGradientLayer 为底层的视图，作为页面渐变背景并随控制器自动拉伸（layer 无 autoresizingMask，故包一层 UIView）
 static UIColor *PM_accent(void)      { return [UIColor colorWithRed:0.23 green:0.54 blue:0.90 alpha:1]; } // 天蓝 #3A8AE6
 static UIColor *PM_accentSoft(void)  { return [UIColor colorWithRed:0.19 green:0.50 blue:0.86 alpha:1]; } // 深一档天蓝（高亮文本）
 static UIColor *PM_bg(void)          { return [UIColor colorWithRed:0.93 green:0.96 blue:1.0 alpha:1]; }    // 页面渐变上层（低饱和蓝）
@@ -694,14 +702,14 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;   // 强制浅色，与自绘 UI 一致
     self.view.backgroundColor = PM_bg();
     // 浅色玻璃贴片：低饱和柔和渐变背景
-    CAGradientLayer *bg = [CAGradientLayer layer];
-    bg.colors = @[(id)PM_bg().CGColor,
-                  (id)[UIColor colorWithRed:0.88 green:0.93 blue:0.99 alpha:1].CGColor];
-    bg.startPoint = CGPointMake(0, 0);
-    bg.endPoint = CGPointMake(0.65, 1);
-    bg.frame = self.view.bounds;
-    bg.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [self.view.layer insertSublayer:bg atIndex:0];
+    PMGradientView *bgView = [[PMGradientView alloc] initWithFrame:self.view.bounds];
+    bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    CAGradientLayer *bgGrad = (CAGradientLayer *)bgView.layer;
+    bgGrad.colors = @[(id)PM_bg().CGColor,
+                      (id)[UIColor colorWithRed:0.88 green:0.93 blue:0.99 alpha:1].CGColor];
+    bgGrad.startPoint = CGPointMake(0, 0);
+    bgGrad.endPoint = CGPointMake(0.65, 1);
+    [self.view insertSubview:bgView atIndex:0];
     _searchText = @"";
     _filterPerm = NSNotFound;
 
