@@ -679,12 +679,12 @@ static void PM_fillPerms(NSMutableDictionary *app) {
             NSMutableArray *perms = _app[@"perms"];
             if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; _app[@"perms"] = perms; }
             while (perms.count <= PMPermLocation) [perms addObject:@(-1)];
-            perms[PMLocation] = @(lvl == 0 ? 3 : lvl);   // 下次询问存 3(未决定)
+            perms[PMPermLocation] = @(lvl == 0 ? 3 : lvl);   // 下次询问存 3(未决定)
             [self reloadFromModel];
             if (_onChange) _onChange(bid);
         }];
         NSInteger eff = (lvl == 0) ? 3 : lvl;
-        if (cur == eff) a.checked = YES;
+        // 当前项以标题前缀提示，省略 checked 勾选（部分 SDK 无此属性）
         [ac addAction:a];
     };
     add(@"下次询问或在我共享时", 0);
@@ -1140,7 +1140,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     for (NSDictionary *app in _allApps) {
         NSArray *perms = app[@"perms"];
         if (!perms || PMPermLocation >= perms.count) continue;
-        NSInteger st = [perms[PMLocation] integerValue];
+        NSInteger st = [perms[PMPermLocation] integerValue];
         total++;
         if (st == 1 || st == 2) onCount++;
         if (st == 2) alwaysCount++;
@@ -1180,7 +1180,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
                 NSMutableArray *perms = app[@"perms"];
                 if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; app[@"perms"] = perms; }
                 while (perms.count <= PMPermLocation) [perms addObject:@(-1)];
-                perms[PMLocation] = @(lvl == 0 ? 3 : lvl);
+                perms[PMPermLocation] = @(lvl == 0 ? 3 : lvl);
             }
             [self refreshAllCards];
             [self refreshStat];
@@ -1188,7 +1188,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
             [self toast:[NSString stringWithFormat:@"已将全部应用的定位设为「%@」", PM_locationSuffix(lvl == 0 ? 3 : lvl)]];
         }];
         NSInteger eff = (lvl == 0) ? 3 : lvl;
-        if (cur == eff) a.checked = YES;
+        // 当前项以标题前缀提示，省略 checked 勾选（部分 SDK 无此属性）
         [ac addAction:a];
     };
     add(@"下次询问或在我共享时", 0);
