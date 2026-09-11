@@ -11,7 +11,6 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
@@ -86,25 +85,6 @@ static NSArray *PM_permServices(NSInteger p) {
 static BOOL PM_permIsTCC(NSInteger p) {
     return PM_permServices(p).count > 0;
 }
-
-// 页面渐变背景视图：底层为 CAGradientLayer，随控制器 bounds 自动拉伸
-@interface PMGradientView : UIView
-@end
-@implementation PMGradientView
-+ (Class)layerClass { return [CAGradientLayer class]; }
-@end
-
-#pragma mark - 浅色玻璃贴片 配色（天蓝 强调）
-// 以 CAGradientLayer 为底层的视图，作为页面渐变背景并随控制器自动拉伸（layer 无 autoresizingMask，故包一层 UIView）
-static UIColor *PM_accent(void)      { return [UIColor colorWithRed:0.23 green:0.54 blue:0.90 alpha:1]; } // 天蓝 #3A8AE6
-static UIColor *PM_accentSoft(void)  { return [UIColor colorWithRed:0.19 green:0.50 blue:0.86 alpha:1]; } // 深一档天蓝（高亮文本）
-static UIColor *PM_bg(void)          { return [UIColor colorWithRed:0.93 green:0.96 blue:1.0 alpha:1]; }    // 页面渐变上层（低饱和蓝）
-static UIColor *PM_card(void)        { return [UIColor colorWithWhite:1 alpha:0.66]; }                     // 半透明白卡（玻璃）
-static UIColor *PM_cardSoft(void)    { return [UIColor colorWithWhite:1 alpha:0.52]; }                     // 顶部功能卡（更透）
-static UIColor *PM_textMain(void)    { return [UIColor colorWithWhite:0.13 alpha:1]; }                     // 主文字
-static UIColor *PM_textSub(void)     { return [UIColor colorWithWhite:0.42 alpha:1]; }                     // 次级
-static UIColor *PM_textDim(void)     { return [UIColor colorWithWhite:0.56 alpha:1]; }                     // 弱
-static UIColor *PM_switchOff(void)   { return [UIColor colorWithWhite:0.85 alpha:1]; }                     // 开关 OFF 底
 
 // 用于「枚举 App」的隐私类 service 全集（与系统隐私面板对应）
 static NSArray *PM_privacyServices(void) {
@@ -323,6 +303,56 @@ static void PM_applyPerm(NSInteger p, NSString *client, NSInteger val, NSData *c
     }
 }
 
+// ── 定位三态（使用期间 / 始终 / 下次询问）专用读写 ──
+// 删除某 client 在某 service 的 TCC 记录（用于「使用期间」清除 always、及「下次询问」重置）
+static void PM_deleteService(NSString *svc, NSString *client) {
+    sqlite3 *db = PM_openTCC();
+    if (!db) return;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db, "DELETE FROM access WHERE service=? AND client=?", -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(s, 1, [svc UTF8String], -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(s, 2, [client UTF8String], -1, SQLITE_TRANSIENT);
+        sqlite3_step(s);
+    }
+    sqlite3_finalize(s);
+    PM_checkpoint(db);
+    sqlite3_close(db);
+}
+
+// 读取某 App 定位级别：0=拒绝/未授权  1=使用期间  2=始终  3=未决定(下次询问)
+static NSInteger PM_locationLevel(NSString *client) {
+    NSInteger always = PM_status(@"kTCCServiceLocationAlways", client);
+    NSInteger when   = PM_status(@"kTCCServiceLocation", client);
+    if (always == 2) return 2;
+    if (when == 2)   return 1;
+    if (when == 0 || always == 0) return 0;   // 明确拒绝
+    return 3;                                  // 未知/未决定
+}
+
+// 设置某 App 定位级别：1=使用期间  2=始终  0/3=下次询问(重置为未决定)
+static void PM_setLocationLevel(NSString *client, NSInteger level, NSData *csreq) {
+    if (level == 2) {
+        PM_setStatus(@"kTCCServiceLocation", client, 2, csreq);
+        PM_setStatus(@"kTCCServiceLocationAlways", client, 2, csreq);
+    } else if (level == 1) {
+        PM_setStatus(@"kTCCServiceLocation", client, 2, csreq);
+        PM_deleteService(@"kTCCServiceLocationAlways", client);   // 清掉 always，避免系统降级显示
+    } else {
+        PM_deleteService(@"kTCCServiceLocation", client);
+        PM_deleteService(@"kTCCServiceLocationAlways", client);
+    }
+}
+
+// 定位级别 → 中文后缀
+static NSString *PM_locationSuffix(NSInteger level) {
+    switch (level) {
+        case 1: return @"使用期间";
+        case 2: return @"始终";
+        case 0: return @"拒绝";
+        default: return @"下次询问";   // 3 = 未决定
+    }
+}
+
 // 本地网络：尽力项。写意图到自身 prefs（系统本地网络不在 TCC 内，无法保证生效）。
 static NSString *PM_lnKey(NSString *client) { return [@"PM_LocalNet_" stringByAppendingString:client]; }
 static NSUserDefaults *PM_selfPrefs(void) {
@@ -440,7 +470,10 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     NSMutableArray *perms = [NSMutableArray array];
     NSString *bid = app[@"bid"];
     for (NSInteger p = 0; p < PMPermCount; p++) {
-        NSInteger st = (p == PMPermLocalNetwork) ? PM_lnStatus(bid) : PM_permStatus(p, bid);
+        NSInteger st;
+        if (p == PMPermLocalNetwork) st = PM_lnStatus(bid);
+        else if (p == PMPermLocation) st = PM_locationLevel(bid);   // 0/1/2/3
+        else st = PM_permStatus(p, bid);
         [perms addObject:@(st)];
     }
     app[@"perms"] = perms;
@@ -474,22 +507,20 @@ static void PM_fillPerms(NSMutableDictionary *app) {
 }
 
 - (void)buildUI {
-    self.backgroundColor = PM_card();
+    self.backgroundColor = [UIColor colorWithWhite:0.98 alpha:0.92];
     self.layer.cornerRadius = 18;
     self.layer.masksToBounds = NO;
-    self.layer.borderWidth = 1.0 / [UIScreen mainScreen].scale;   // 1px 高光描边，玻璃质感
-    self.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.7].CGColor;
-    self.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.14].CGColor;
+    self.layer.shadowColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
     self.layer.shadowOpacity = 1;
-    self.layer.shadowRadius = 16;
-    self.layer.shadowOffset = CGSizeMake(0, 6);
+    self.layer.shadowRadius = 12;
+    self.layer.shadowOffset = CGSizeMake(0, 4);
 
     // ── 头部行：图标 + 名称 + 重置 + 总开关 ──
     _iconView = [[UIImageView alloc] init];
     _iconView.contentMode = UIViewContentModeScaleAspectFill;
     _iconView.layer.cornerRadius = 9;
     _iconView.clipsToBounds = YES;
-    _iconView.backgroundColor = [UIColor colorWithWhite:0.9 alpha:0.6];
+    _iconView.backgroundColor = [UIColor colorWithRed:0.88 green:0.90 blue:0.95 alpha:1];
     [_iconView.widthAnchor constraintEqualToConstant:36].active = YES;
     [_iconView.heightAnchor constraintEqualToConstant:36].active = YES;
     [self loadIconAsync];
@@ -497,23 +528,23 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     UILabel *nameLabel = [[UILabel alloc] init];
     nameLabel.text = _app[@"name"] ?: _app[@"bid"];
     nameLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    nameLabel.textColor = PM_textMain();
+    nameLabel.textColor = [UIColor colorWithWhite:0.12 alpha:1];
     [nameLabel setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
     [nameLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
 
     UIButton *resetBtn = [UIButton buttonWithType:UIButtonTypeSystem];
     [resetBtn setTitle:@"重置" forState:UIControlStateNormal];
-    [resetBtn setTitleColor:PM_accent() forState:UIControlStateNormal];
+    [resetBtn setTitleColor:[UIColor colorWithRed:0.78 green:0.28 blue:0.28 alpha:1] forState:UIControlStateNormal];
     resetBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
     [resetBtn addTarget:self action:@selector(resetTapped) forControlEvents:UIControlEventTouchUpInside];
 
     UILabel *masterLabel = [[UILabel alloc] init];
     masterLabel.text = @"总开关";
     masterLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    masterLabel.textColor = PM_textSub();
+    masterLabel.textColor = [UIColor colorWithWhite:0.40 alpha:1];
 
     _masterSwitch = [[UISwitch alloc] init];
-    _masterSwitch.onTintColor = PM_accent();
+    _masterSwitch.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
     [_masterSwitch addTarget:self action:@selector(masterChanged) forControlEvents:UIControlEventValueChanged];
 
     UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[_iconView, nameLabel, resetBtn, masterLabel, _masterSwitch]];
@@ -528,13 +559,13 @@ static void PM_fillPerms(NSMutableDictionary *app) {
         UILabel *lbl = [[UILabel alloc] init];
         lbl.text = PM_permName(p);
         lbl.font = [UIFont systemFontOfSize:10];
-        lbl.textColor = PM_textSub();
+        lbl.textColor = [UIColor colorWithWhite:0.35 alpha:1];
         lbl.textAlignment = NSTextAlignmentCenter;
         [_permLabels addObject:lbl];
 
         UISwitch *sw = [[UISwitch alloc] init];
         sw.transform = CGAffineTransformMakeScale(0.66, 0.66);
-        sw.onTintColor = PM_accent();
+        sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
         [sw addTarget:self action:@selector(permChanged:) forControlEvents:UIControlEventValueChanged];
         [_permSwitches addObject:sw];
 
@@ -542,6 +573,14 @@ static void PM_fillPerms(NSMutableDictionary *app) {
         item.axis = UILayoutConstraintAxisVertical;
         item.alignment = UIStackViewAlignmentCenter;
         item.spacing = 2;
+        // 定位项：长按弹出三态选择（仅作用于当前 App）
+        if (p == PMPermLocation) {
+            item.userInteractionEnabled = YES;
+            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(locationLongPress:)];
+            lp.minimumPressDuration = 0.5;
+            [item addGestureRecognizer:lp];
+            lbl.userInteractionEnabled = YES;
+        }
         [permItems addObject:item];
     }
     UIStackView *permRow = [[UIStackView alloc] initWithArrangedSubviews:permItems];
@@ -589,12 +628,18 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     NSData *cs = _app[@"path"] ? PM_csreq(_app[@"path"]) : nil;
     for (NSInteger p = 0; p < PMPermCount; p++) {
         if (p == PMPermLocalNetwork) PM_lnSet(bid, on);
+        else if (p == PMPermLocation) PM_setLocationLevel(bid, on ? 1 : 0, cs);   // 总开关开定位=使用期间
         else PM_applyPerm(p, bid, on ? 2 : 0, cs);
     }
     // 乐观更新内存模型
     NSMutableArray *perms = _app[@"perms"];
     if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; _app[@"perms"] = perms; }
-    for (NSInteger p = 0; p < PMPermCount; p++) { while (perms.count <= p) [perms addObject:@(-1)]; perms[p] = @(on ? 2 : 0); }
+    for (NSInteger p = 0; p < PMPermCount; p++) {
+        while (perms.count <= p) [perms addObject:@(-1)];
+        NSInteger v = 0;
+        if (on) v = (p == PMPermLocation) ? 1 : 2;
+        perms[p] = @(v);
+    }
     [self reloadFromModel];
     if (_onChange) _onChange(bid);
 }
@@ -606,14 +651,51 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     NSString *bid = _app[@"bid"];
     NSData *cs = _app[@"path"] ? PM_csreq(_app[@"path"]) : nil;
     if (idx == PMPermLocalNetwork) PM_lnSet(bid, on);
+    else if (idx == PMPermLocation) PM_setLocationLevel(bid, on ? 1 : 0, cs);   // 开关开=使用期间，关=未决定
     else PM_applyPerm((NSInteger)idx, bid, on ? 2 : 0, cs);
     // 乐观更新内存模型：否则 reloadFromModel 会用改动前从 TCC 读出的旧 perms 把 switch 设回原值（视觉弹回）
     NSMutableArray *perms = _app[@"perms"];
     if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; _app[@"perms"] = perms; }
     while (perms.count <= idx) [perms addObject:@(-1)];
-    perms[idx] = @(on ? 2 : 0);
+    NSInteger newSt = 0;
+    if (on) newSt = (idx == PMPermLocation) ? 1 : 2;
+    perms[idx] = @(newSt);
     [self reloadFromModel];
     if (_onChange) _onChange(bid);
+}
+
+// 长按定位项：弹出三态选择（仅作用于当前 App）
+- (void)locationLongPress:(UIGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    NSString *bid = _app[@"bid"];
+    NSInteger cur = PM_locationLevel(bid);
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"定位权限级别"
+                                                                message:_app[@"name"] ?: bid
+                                                         preferredStyle:UIAlertControllerStyleActionSheet];
+    void (^add)(NSString *, NSInteger) = ^(NSString *title, NSInteger lvl) {
+        UIAlertAction *a = [UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *_) {
+            NSData *cs = _app[@"path"] ? PM_csreq(_app[@"path"]) : nil;
+            PM_setLocationLevel(bid, lvl, cs);
+            NSMutableArray *perms = _app[@"perms"];
+            if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; _app[@"perms"] = perms; }
+            while (perms.count <= PMPermLocation) [perms addObject:@(-1)];
+            perms[PMLocation] = @(lvl == 0 ? 3 : lvl);   // 下次询问存 3(未决定)
+            [self reloadFromModel];
+            if (_onChange) _onChange(bid);
+        }];
+        NSInteger eff = (lvl == 0) ? 3 : lvl;
+        if (cur == eff) a.checked = YES;
+        [ac addAction:a];
+    };
+    add(@"下次询问或在我共享时", 0);
+    add(@"使用app期间", 1);
+    add(@"始终", 2);
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    UIViewController *vc = [UIApplication sharedApplication].keyWindow.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    ac.popoverPresentationController.sourceView = g.view;
+    ac.popoverPresentationController.sourceRect = g.view.bounds;
+    [vc presentViewController:ac animated:YES completion:nil];
 }
 
 - (void)resetTapped {
@@ -637,9 +719,16 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     BOOL allOn = YES;
     for (NSInteger p = 0; p < PMPermCount; p++) {
         NSInteger st = (perms && p < perms.count) ? [perms[p] integerValue] : -1;
-        BOOL on = (st == 2 || st == 3);
+        BOOL on;
+        if (p == PMPermLocation) on = (st == 1 || st == 2);   // 定位：使用期间/始终 均为开
+        else on = (st == 2 || st == 3);
         if (p < _permSwitches.count) _permSwitches[p].on = on;
         if (!on) allOn = NO;
+        // 定位标签显示当前级别后缀（开关+标签后缀）
+        if (p == PMPermLocation && p < _permLabels.count) {
+            UILabel *l = _permLabels[p];
+            l.text = (st >= 0) ? [NSString stringWithFormat:@"定位·%@", PM_locationSuffix(st)] : @"定位";
+        }
     }
     _masterSwitch.on = allOn;
     [self applyHighlight];
@@ -650,10 +739,10 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     for (NSInteger p = 0; p < _permLabels.count; p++) {
         UILabel *l = _permLabels[p];
         if (p == _highlightPerm) {
-            l.textColor = PM_accentSoft();
+            l.textColor = [UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1];
             l.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
         } else {
-            l.textColor = PM_textSub();
+            l.textColor = [UIColor colorWithWhite:0.35 alpha:1];
             l.font = [UIFont systemFontOfSize:10 weight:UIFontWeightRegular];
         }
     }
@@ -675,6 +764,7 @@ static void PM_fillPerms(NSMutableDictionary *app) {
     NSString *_searchText;
     NSMutableArray<UISwitch *> *_funcSwitches;  // 7 个「按功能」开关
     NSMutableArray<UIButton *> *_funcLabels;    // 7 个「按功能」标签（点按 = 筛选）
+    UIButton *_locLabelBtn;                     // 顶部「按功能」定位标签（用于显示级别后缀）
     NSInteger _filterPerm;                      // 当前筛选的权限（-1 = 无）
 }
 
@@ -699,17 +789,8 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"隐私总开关";
-    self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;   // 强制浅色，与自绘 UI 一致
-    self.view.backgroundColor = PM_bg();
-    // 浅色玻璃贴片：低饱和柔和渐变背景
-    PMGradientView *bgView = [[PMGradientView alloc] initWithFrame:self.view.bounds];
-    bgView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    CAGradientLayer *bgGrad = (CAGradientLayer *)bgView.layer;
-    bgGrad.colors = @[(id)PM_bg().CGColor,
-                      (id)[UIColor colorWithRed:0.88 green:0.93 blue:0.99 alpha:1].CGColor];
-    bgGrad.startPoint = CGPointMake(0, 0);
-    bgGrad.endPoint = CGPointMake(0.65, 1);
-    [self.view insertSubview:bgView atIndex:0];
+    self.overrideUserInterfaceStyle = UIUserInterfaceStyleLight;
+    self.view.backgroundColor = [UIColor colorWithRed:0.95 green:0.96 blue:0.98 alpha:1];
     _searchText = @"";
     _filterPerm = NSNotFound;
 
@@ -747,10 +828,9 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 - (void)buildUI {
     // ── 按功能一键开关 卡片（替代原「全部允许/全部拒绝」）──
     UIView *funcCard = [[UIView alloc] init];
-    // 浅色玻璃圆角底卡，让一排开关落在整洁的卡片上，避免悬浮感
-    funcCard.backgroundColor = PM_cardSoft();
-    funcCard.layer.cornerRadius = 14;
-    funcCard.clipsToBounds = YES;
+    funcCard.backgroundColor = [UIColor clearColor];
+    funcCard.layer.cornerRadius = 0;
+    funcCard.layer.shadowOpacity = 0;
 
     _funcSwitches = [NSMutableArray array];
     _funcLabels = [NSMutableArray array];
@@ -758,24 +838,19 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     for (NSInteger p = 0; p < PMPermCount; p++) {
         // 权限名做成按钮：点按 = 按该权限筛选下方列表
         UIButton *lblBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+        // 超过 2 个字在单排里会被压缩，按字数中分两行（如「本地网络」→「本地／网络」）
         NSString *pn = PM_permName(p);
-        // 统一占满两行居中——无论名称 2 字还是 3 字都占同样高度，
-        // 7 个开关才能底部严格对齐（修旧版「本地网络折两行、照片一行」导致的开关上下错落）
         if (pn.length > 2) {
             NSUInteger mid = pn.length / 2;
             pn = [NSString stringWithFormat:@"%@\n%@", [pn substringToIndex:mid], [pn substringFromIndex:mid]];
-        } else {
-            pn = [NSString stringWithFormat:@"%@\n ", pn];
         }
         [lblBtn setTitle:pn forState:UIControlStateNormal];
-        [lblBtn setTitleColor:PM_textMain() forState:UIControlStateNormal];
+        [lblBtn setTitleColor:[UIColor colorWithWhite:0.18 alpha:1] forState:UIControlStateNormal];
         lblBtn.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         lblBtn.titleLabel.textAlignment = NSTextAlignmentCenter;
-        lblBtn.titleLabel.lineBreakMode = NSLineBreakByCharWrapping;
+        lblBtn.titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
         lblBtn.titleLabel.adjustsFontSizeToFitWidth = NO;  // 不缩放，靠换行显示完整
-        lblBtn.titleLabel.numberOfLines = 2;
-        // 固定标签区高度=两行文字，保证整排 7 个开关在同一水平线
-        [lblBtn.heightAnchor constraintEqualToConstant:30].active = YES;
+        lblBtn.titleLabel.numberOfLines = 0;
         lblBtn.tag = p;
         [lblBtn addTarget:self action:@selector(filterTapped:) forControlEvents:UIControlEventTouchUpInside];
         [_funcLabels addObject:lblBtn];
@@ -783,8 +858,8 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         UISwitch *sw = [[UISwitch alloc] init];
         sw.tag = p;
         sw.transform = CGAffineTransformMakeScale(0.82, 0.82);
-        sw.onTintColor = PM_accent();
-        sw.tintColor = PM_switchOff();   // OFF 态深灰，深色下不刺眼
+        sw.onTintColor = [UIColor colorWithRed:0.32 green:0.68 blue:0.88 alpha:1];
+        sw.tintColor = [UIColor colorWithWhite:0.82 alpha:1];   // OFF 态浅灰，避免渲染成黑
         sw.backgroundColor = [UIColor clearColor];
         [sw addTarget:self action:@selector(funcSwitchChanged:) forControlEvents:UIControlEventValueChanged];
         [_funcSwitches addObject:sw];
@@ -795,6 +870,14 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         cell.alignment = UIStackViewAlignmentCenter;
         cell.spacing = 4;
         [cells addObject:cell];
+        // 定位单元格：长按弹三态选择（作用于全部应用）；记录标签引用用于显示后缀
+        if (p == PMPermLocation) {
+            _locLabelBtn = lblBtn;
+            cell.userInteractionEnabled = YES;
+            UILongPressGestureRecognizer *lp = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(locationLongPressAll:)];
+            lp.minimumPressDuration = 0.5;
+            [cell addGestureRecognizer:lp];
+        }
     }
     // 单横排：7 个权限开关一字排开，加大间距避免误触
     UIStackView *grid = [[UIStackView alloc] initWithArrangedSubviews:cells];
@@ -816,14 +899,13 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
 
     _statLabel = [[UILabel alloc] init];
     _statLabel.font = [UIFont systemFontOfSize:12];
-    _statLabel.textColor = PM_textSub();
+    _statLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
 
     _searchBar = [[UISearchBar alloc] init];
     _searchBar.placeholder = @"搜索应用名称或 Bundle ID";
     _searchBar.delegate = self;
     _searchBar.searchBarStyle = UISearchBarStyleMinimal;
     _searchBar.backgroundImage = [UIImage new];
-    _searchBar.tintColor = PM_accent();   // 光标/取消按钮珊瑚色
 
     _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     _tableView.delegate = self;
@@ -834,15 +916,17 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     _tableView.contentInset = UIEdgeInsetsMake(4, 0, 80, 0);
 
     UIButton *exportBtn = PM_pillButton(@"导出配置",
-        [UIColor colorWithWhite:1 alpha:0.66], PM_accent());
+        [UIColor colorWithRed:0.35 green:0.56 blue:1.0 alpha:0.15],
+        [UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1]);
     [exportBtn addTarget:self action:@selector(exportConfig) forControlEvents:UIControlEventTouchUpInside];
 
     UIButton *importBtn = PM_pillButton(@"导入配置",
-        [UIColor colorWithWhite:1 alpha:0.66], [UIColor colorWithRed:0.17 green:0.62 blue:0.48 alpha:1]);
+        [UIColor colorWithRed:0.45 green:0.78 blue:0.54 alpha:0.18],
+        [UIColor colorWithRed:0.13 green:0.55 blue:0.24 alpha:1]);
     [importBtn addTarget:self action:@selector(importConfig) forControlEvents:UIControlEventTouchUpInside];
 
     UIView *bottomBar = [[UIView alloc] init];
-    bottomBar.backgroundColor = [UIColor colorWithWhite:1 alpha:0.72];
+    bottomBar.backgroundColor = [UIColor colorWithWhite:0.97 alpha:0.95];
     bottomBar.translatesAutoresizingMaskIntoConstraints = NO;
     UIStackView *bottomRow = [[UIStackView alloc] initWithArrangedSubviews:@[exportBtn, importBtn]];
     bottomRow.axis = UILayoutConstraintAxisHorizontal;
@@ -956,7 +1040,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         else
             empty.text = @"暂无应用（TCC 中无隐私类记录）";
         empty.font = [UIFont systemFontOfSize:14];
-        empty.textColor = PM_textDim();
+        empty.textColor = [UIColor colorWithWhite:0.55 alpha:1];
         empty.textAlignment = NSTextAlignmentCenter;
         _tableView.backgroundView = empty;
     } else {
@@ -984,7 +1068,10 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         BOOL all = YES;
         for (NSInteger p = 0; p < PMPermCount; p++) {
             NSInteger st = (perms && p < perms.count) ? [perms[p] integerValue] : -1;
-            if (!(st == 2 || st == 3)) { all = NO; break; }
+            BOOL on;
+            if (p == PMPermLocation) on = (st == 1 || st == 2);
+            else on = (st == 2 || st == 3);
+            if (!on) { all = NO; break; }
         }
         if (all) on++;
         total++;
@@ -1009,17 +1096,21 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         NSString *bid = app[@"bid"];
         NSData *cs = app[@"path"] ? PM_csreq(app[@"path"]) : nil;
         if (p == PMPermLocalNetwork) PM_lnSet(bid, on);
+        else if (p == PMPermLocation) PM_setLocationLevel(bid, on ? 1 : 0, cs);   // 批量开定位=使用期间
         else PM_applyPerm(p, bid, on ? 2 : 0, cs);
         // 同步内存模型，刷新卡片时保持一致
         NSMutableArray *perms = app[@"perms"];
         if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; app[@"perms"] = perms; }
         while (perms.count <= p) [perms addObject:@(-1)];
-        perms[p] = @(on ? 2 : 0);
+        NSInteger newSt = 0;
+        if (on) newSt = (p == PMPermLocation) ? 1 : 2;
+        perms[p] = @(newSt);
         cnt++;
     }
     [self refreshAllCards];
     [self refreshStat];
     [self refreshFuncSwitches];
+    [self refreshLocationTop];
     [self toast:[NSString stringWithFormat:@"已将「%@」权限对 %ld 个应用%@", PM_permName(p), (long)cnt, on ? @"开启" : @"关闭"]];
 }
 
@@ -1033,10 +1124,80 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
             if (!perms || p >= perms.count) continue;
             NSInteger st = [perms[p] integerValue];
             total++;
-            if (st == 2 || st == 3) onCount++;
+            BOOL on;
+            if (p == PMPermLocation) on = (st == 1 || st == 2);
+            else on = (st == 2 || st == 3);
+            if (on) onCount++;
         }
         _funcSwitches[p].on = (total > 0 && onCount == total);
     }
+    [self refreshLocationTop];
+}
+
+// 顶部「按功能」定位聚合级别：-1=混合  0/3=下次询问  1=使用期间  2=始终
+- (NSInteger)topLocationAggregate {
+    NSInteger onCount = 0, alwaysCount = 0, total = 0;
+    for (NSDictionary *app in _allApps) {
+        NSArray *perms = app[@"perms"];
+        if (!perms || PMPermLocation >= perms.count) continue;
+        NSInteger st = [perms[PMLocation] integerValue];
+        total++;
+        if (st == 1 || st == 2) onCount++;
+        if (st == 2) alwaysCount++;
+    }
+    if (total == 0) return 3;
+    if (onCount == 0) return 3;
+    if (alwaysCount == total) return 2;
+    if (onCount == total) return 1;
+    return -1;
+}
+
+// 刷新顶部「按功能」定位标签后缀（始终/使用期间/混合/下次询问）
+- (void)refreshLocationTop {
+    if (!_locLabelBtn) return;
+    NSInteger agg = [self topLocationAggregate];
+    NSString *suf;
+    if (agg == -1) suf = @"混合";
+    else if (agg == 2) suf = @"始终";
+    else if (agg == 1) suf = @"使用期间";
+    else suf = @"下次询问";
+    [_locLabelBtn setTitle:[NSString stringWithFormat:@"定位\n%@", suf] forState:UIControlStateNormal];
+}
+
+// 长按顶部「按功能」定位：对全部应用设置定位级别
+- (void)locationLongPressAll:(UIGestureRecognizer *)g {
+    if (g.state != UIGestureRecognizerStateBegan) return;
+    NSInteger cur = [self topLocationAggregate];
+    UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"定位级别（全部应用）"
+                                                                message:nil
+                                                         preferredStyle:UIAlertControllerStyleActionSheet];
+    void (^add)(NSString *, NSInteger) = ^(NSString *title, NSInteger lvl) {
+        UIAlertAction *a = [UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *_) {
+            for (NSMutableDictionary *app in _allApps) {
+                NSString *bid = app[@"bid"];
+                NSData *cs = app[@"path"] ? PM_csreq(app[@"path"]) : nil;
+                PM_setLocationLevel(bid, lvl, cs);
+                NSMutableArray *perms = app[@"perms"];
+                if (![perms isKindOfClass:[NSMutableArray class]]) { perms = [NSMutableArray array]; app[@"perms"] = perms; }
+                while (perms.count <= PMPermLocation) [perms addObject:@(-1)];
+                perms[PMLocation] = @(lvl == 0 ? 3 : lvl);
+            }
+            [self refreshAllCards];
+            [self refreshStat];
+            [self refreshFuncSwitches];
+            [self toast:[NSString stringWithFormat:@"已将全部应用的定位设为「%@」", PM_locationSuffix(lvl == 0 ? 3 : lvl)]];
+        }];
+        NSInteger eff = (lvl == 0) ? 3 : lvl;
+        if (cur == eff) a.checked = YES;
+        [ac addAction:a];
+    };
+    add(@"下次询问或在我共享时", 0);
+    add(@"使用app期间", 1);
+    add(@"始终", 2);
+    [ac addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    ac.popoverPresentationController.sourceView = g.view;
+    ac.popoverPresentationController.sourceRect = g.view.bounds;
+    [self presentViewController:ac animated:YES completion:nil];
 }
 
 #pragma mark - 按权限筛选（点权限名 → 下方只显示该权限已开启的 App）
@@ -1051,6 +1212,7 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     // TCC 权限：优先用内存缓存
     if (perms && p < perms.count) {
         NSInteger st = [perms[p] integerValue];
+        if (p == PMPermLocation) return (st == 1 || st == 2);
         return (st == 2 || st == 3);
     }
     for (NSString *svc in PM_permServices(p)) {
@@ -1074,10 +1236,10 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
     for (NSInteger p = 0; p < PMPermCount; p++) {
         UIButton *b = _funcLabels[p];
         if (p == _filterPerm) {
-            [b setTitleColor:PM_accentSoft() forState:UIControlStateNormal];
+            [b setTitleColor:[UIColor colorWithRed:0.17 green:0.35 blue:0.72 alpha:1] forState:UIControlStateNormal];
             b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightBold];
         } else {
-            [b setTitleColor:PM_textSub() forState:UIControlStateNormal];
+            [b setTitleColor:[UIColor colorWithWhite:0.18 alpha:1] forState:UIControlStateNormal];
             b.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
         }
     }
@@ -1126,10 +1288,20 @@ static UIButton *PM_pillButton(NSString *title, UIColor *bg, UIColor *fg) {
         NSMutableArray *mperms = [NSMutableArray array];
         for (NSInteger p = 0; p < PMPermCount; p++) {
             NSInteger st = (p < perms.count) ? [perms[p] integerValue] : -1;
-            BOOL on = (st == 2 || st == 3);
-            if (p == PMPermLocalNetwork) PM_lnSet(bid, on);
-            else PM_applyPerm(p, bid, on ? 2 : 0, cs);
-            [mperms addObject:@(on ? 2 : 0)];
+            if (p == PMPermLocalNetwork) {
+                BOOL on = (st == 2 || st == 3);
+                PM_lnSet(bid, on);
+                [mperms addObject:@(on ? 2 : 0)];
+            } else if (p == PMPermLocation) {
+                // 还原导入的级别：1/2 保持，0/3 → 下次询问(3)
+                NSInteger lvl = (st == 1 || st == 2) ? st : 0;
+                PM_setLocationLevel(bid, lvl, cs);
+                [mperms addObject:@((st == 1 || st == 2) ? st : 3)];
+            } else {
+                BOOL on = (st == 2 || st == 3);
+                PM_applyPerm(p, bid, on ? 2 : 0, cs);
+                [mperms addObject:@(on ? 2 : 0)];
+            }
         }
         match[@"perms"] = mperms;
         count++;
