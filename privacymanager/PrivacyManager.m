@@ -278,8 +278,16 @@ static BOOL PM_setStatus(NSString *svc, NSString *client, NSInteger val, NSData 
     return ok;
 }
 
+// 前向声明：PM_selfPrefs 定义在后面，跟踪权限的偏好镜像需要在这里调用
+static NSUserDefaults *PM_selfPrefs(void);
+
 // 重置某 App 某权限：删除其在各候选 service 的 TCC 行（恢复系统默认提示）
 static void PM_resetPerm(NSInteger p, NSString *client) {
+    // 跟踪权限：同时清掉偏好镜像，ATT hook 不再代答 → 恢复系统原生弹窗
+    if (p == PMPermTracking) {
+        [PM_selfPrefs() removeObjectForKey:[@"PM_Track_" stringByAppendingString:client]];
+        [PM_selfPrefs() synchronize];
+    }
     sqlite3 *db = PM_openTCC();
     if (!db) return;
     for (NSString *svc in PM_permServices(p)) {
@@ -300,6 +308,12 @@ static void PM_applyPerm(NSInteger p, NSString *client, NSInteger val, NSData *c
     if (!PM_permIsTCC(p)) return; // 本地网络不走 TCC
     for (NSString *svc in PM_permServices(p)) {
         PM_setStatus(svc, client, val, csreq);
+    }
+    // 跟踪权限：镜像到偏好，供 App 进程内的 ATT hook（PMHook）静默应答，
+    // 否则 App 调 requestTrackingAuthorization 时系统仍会弹「允许跟踪」授权框
+    if (p == PMPermTracking) {
+        [PM_selfPrefs() setInteger:val forKey:[@"PM_Track_" stringByAppendingString:client]];
+        [PM_selfPrefs() synchronize];
     }
 }
 

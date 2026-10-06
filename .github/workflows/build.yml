@@ -38,6 +38,23 @@ jobs:
           file PrivacyManager.dylib
           lipo -info PrivacyManager.dylib
 
+      - name: "Compile PMHook App-side tweak (arm64+arm64e)"
+        run: |
+          set -e
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          for arch in arm64 arm64e; do
+            clang -x objective-c -arch "$arch" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+                  -fobjc-arc -fblocks -O2 -fobjc-exceptions \
+                  -c privacymanager/PMHook.m -o "PMHook_${arch}.o"
+            clang -dynamiclib -arch "$arch" -isysroot "$SDK" -miphoneos-version-min=14.0 \
+                  -fobjc-exceptions -Wl,-undefined,dynamic_lookup \
+                  -install_name "/var/jb/Library/MobileSubstrate/DynamicLibraries/PMHook.dylib" \
+                  -o "PMHook_${arch}.dylib" "PMHook_${arch}.o"
+          done
+          lipo -create PMHook_arm64.dylib PMHook_arm64e.dylib -output PMHook.dylib
+          ldid -S PMHook.dylib
+          file PMHook.dylib
+
       - name: "Re-sign with entitlements"
         run: |
           ldid -Sprivacymanager/entitlements.plist PrivacyManager.dylib
@@ -53,7 +70,7 @@ jobs:
           cp PrivacyManager.dylib "$BUNDLE/PrivacyManager"
           cp privacymanager/Info.plist "$BUNDLE/Info.plist"
           cp privacymanager/Root.plist "$BUNDLE/Root.plist"
-          cp privacymanager/icon.png "$BUNDLE/icon.png"
+          cp privacymanager/icon.png privacymanager/icon@2x.png privacymanager/icon@3x.png "$BUNDLE/"
           mkdir -p stage/DEBIAN
           # PreferenceBundles
           mkdir -p "stage/var/jb/Library/PreferenceBundles"
@@ -61,6 +78,10 @@ jobs:
           # PreferenceLoader
           mkdir -p "stage/var/jb/Library/PreferenceLoader/Preferences"
           cp privacymanager/PrivacyManager.plist "stage/var/jb/Library/PreferenceLoader/Preferences/PrivacyManager.plist"
+          # PMHook：App 侧 ATT 静默应答 tweak
+          mkdir -p "stage/var/jb/Library/MobileSubstrate/DynamicLibraries"
+          cp PMHook.dylib "stage/var/jb/Library/MobileSubstrate/DynamicLibraries/PMHook.dylib"
+          cp privacymanager/PMHook.plist "stage/var/jb/Library/MobileSubstrate/DynamicLibraries/PMHook.plist"
           # control
           sed "s/^Version:.*/Version: $VERSION/" privacymanager/control > stage/DEBIAN/control
           printf '\n' >> stage/DEBIAN/control

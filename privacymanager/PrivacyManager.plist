@@ -12,8 +12,8 @@
 		<string>PMPrincipalController</string>
 		<key>isController</key>
 		<true/>
-		<key>icon</key>
-		<string>PrivacyManager.bundle/icon.png</string>
+			<key>icon</key>
+			<string>icon.png</string>
 		<key>label</key>
 		<string>隐私总开关</string>
 	</dict>

@@ -24,7 +24,7 @@
 	<string>PMPrincipalController</string>
 	<key>CFBundleIconFiles</key>
 	<array>
-		<string>PrivacyManager@2x</string>
+		<string>icon</string>
 	</array>
 	<key>MinimumOSVersion</key>
 	<string>14.0</string>
